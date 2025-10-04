@@ -35,6 +35,7 @@
     "url": "https://github.com/coxxanthony/rest-shape.git"
   },
   "files": [
-    "dist"
+    "dist",
+    "README.md"
   ]
 }
