@@ -1,4 +1,5 @@
 export type QueryField<T = any> = string | ((data: T) => any) | QueryObject;
+
 export interface QueryObject {
   [key: string]: QueryField | QueryDirective;
 }
@@ -25,9 +26,10 @@ function isDirectiveObject(field: any): field is QueryDirective {
 /** Auto-resolve a key in nested object (deep search) */
 function autoResolve(obj: any, key: string): any {
   if (obj == null) return null;
-  if (key in obj) return obj[key];
+  if ((obj as Record<string, any>)[key] !== undefined)
+    return (obj as Record<string, any>)[key];
   for (const k of Object.keys(obj)) {
-    const val = obj[k];
+    const val = (obj as Record<string, any>)[k];
     if (typeof val === "object" && val !== null) {
       const found = autoResolve(val, key);
       if (found !== null) return found;
@@ -38,7 +40,11 @@ function autoResolve(obj: any, key: string): any {
 
 /** Get value by dot-path */
 function getByPath(obj: any, path: string) {
-  return path.split(".").reduce((acc, key) => acc?.[key], obj) ?? null;
+  return (
+    path
+      .split(".")
+      .reduce((acc, key) => (acc as Record<string, any>)?.[key], obj) ?? null
+  );
 }
 
 /** Evaluate JS expression safely with `data` in scope */
@@ -64,7 +70,6 @@ export function parseQuery(queryStr: string): QueryObject {
     line = line.replace(/,$/, ""); // Remove trailing comma
 
     if (line.endsWith("{")) {
-      // key with optional filter: key(filter: "...") {
       const match = line.match(
         /^(\w+)(?:\(\s*filter:\s*["'](.+)["']\s*\))?\s*{\s*,?$/
       );
@@ -134,73 +139,66 @@ export function shape<T>(
   for (const key in queryObj) {
     const field = queryObj[key];
 
+    // Directive objects (nested, filter, skip)
     if (isDirectiveObject(field)) {
       if (field.skipIf && evalExpression(field.skipIf, data)) {
         result[key] = null;
         continue;
       }
-      // Try local data first, then fallback to root data
-      let value = field.path ? getByPath(data, field.path) : (data as any)[key];
-      if (value === undefined && root !== data) {
-        value = root[key];
-      }
-      if (value === undefined) {
-        value = autoResolve(root, key);
-      }
+
+      let value = field.path
+        ? getByPath(data, field.path)
+        : (data as Record<string, any>)[key];
+      if (value === undefined && root !== data)
+        value = (root as Record<string, any>)[key];
+      if (value === undefined) value = autoResolve(root, key);
+
       if (Array.isArray(value)) {
         let arrData = value;
         if (field.filter) {
           arrData = arrData.filter(
-            (item) => evalExpression(field.filter!, { ...item }) === true
+            (item) => evalExpression(field.filter!, item) === true
           );
         }
-        result[key] = arrData.map((item) => shape(item, field.nested!, root));
+        result[key] = arrData.map((item) =>
+          shape(item, field.nested || {}, root)
+        );
       } else if (typeof value === "object" && value !== null) {
-        result[key] = shape(value, field.nested!, root);
+        result[key] = shape(value, field.nested || {}, root);
       } else {
         result[key] = value ?? null;
       }
       continue;
     }
 
-    // Computed field (expression)
-    if (
-      typeof field === "string" &&
-      (field.includes("+") || field.includes(".") || field.includes("'"))
-    ) {
-      // If it's a path, get value; otherwise, evaluate as expression
-      if (/^[\w.]+$/.test(field)) {
+    // Computed expression or alias
+    if (typeof field === "string") {
+      const simplePathRegex = /^[\w.]+$/;
+      if (simplePathRegex.test(field)) {
         result[key] = getByPath(data, field) ?? null;
       } else {
-        // If the expression references the parent key (e.g. user.), use root data
-        if (field.startsWith("user.")) {
-          result[key] = evalExpression(field, root);
-        } else {
-          result[key] = evalExpression(field, data);
-        }
+        result[key] = evalExpression(field, { ...root, ...data });
       }
       continue;
     }
 
+    // Function field
     if (typeof field === "function") {
       result[key] = field(data);
       continue;
     }
 
+    // Nested object
     if (typeof field === "object" && field !== null) {
-      // Try local data first, then fallback to root data
-      let nestedValue = (data as any)[key];
-      if (nestedValue === undefined && root !== data) {
-        nestedValue = root[key];
-      }
-      // If still undefined, try autoResolve (deep search in root)
-      if (nestedValue === undefined) {
-        nestedValue = autoResolve(root, key);
-      }
+      let nestedValue = (data as Record<string, any>)[key];
+      if (nestedValue === undefined && root !== data)
+        nestedValue = (root as Record<string, any>)[key];
+      if (nestedValue === undefined) nestedValue = autoResolve(root, key);
       result[key] = shape(nestedValue, field, root);
       continue;
     }
 
+    // Fallback: direct value
     result[key] = (data as Record<string, any>)[key] ?? null;
   }
 

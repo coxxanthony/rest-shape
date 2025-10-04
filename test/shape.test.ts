@@ -25,7 +25,7 @@ describe("rest-shape", () => {
     ],
   };
 
-  // --- 1️⃣ Computed field ---
+  // --- 1️⃣ Computed field --- - Done
   it("should handle computed fields correctly", () => {
     const query1 = `
 fullName: user.firstName + " " + user.lastName
@@ -34,7 +34,7 @@ fullName: user.firstName + " " + user.lastName
     expect(result).toEqual({ fullName: "John Doe" });
   });
 
-  // --- 2️⃣ Nested departments with skip directive ---
+  // --- 2️⃣ Nested departments with skip directive --- - Done
   it("should shape nested departments with skip directive correctly", () => {
     const query2 = `
 departments {
@@ -64,7 +64,7 @@ departments {
     });
   });
 
-  // --- 3️⃣ Array filtering ---
+  // --- 3️⃣ Array filtering --- - Done
   it("should filter arrays correctly", () => {
     const query3 = `
 posts(filter: "status === 'draft'") {
@@ -77,7 +77,7 @@ posts(filter: "status === 'draft'") {
     });
   });
 
-  // --- 4️⃣ Nested user with computed field + department info ---
+  // --- 4️⃣ Nested user with computed field + department info --- - Done
   it("should shape nested user with computed fields correctly", () => {
     const query4 = `
   user {
@@ -110,7 +110,7 @@ posts(filter: "status === 'draft'") {
     });
   });
 
-  // --- 5️⃣ Missing fields ---
+  // --- 5️⃣ Missing fields --- - Done
   it("should return null for missing fields", () => {
     const queryMissing: QueryObject = { nonExist: "foo.bar" };
     const result = shape(data, queryMissing);
@@ -135,7 +135,7 @@ posts(filter: "status === 'draft'") {
     });
   });
 
-  // --- 7️⃣ handle deeply nested structures ---
+  // --- 7️⃣ handle deeply nested structures --- - Done
   it("should handle deeply nested structures", () => {
     const deepData = { company: { departments: data.departments } };
     const query = `
