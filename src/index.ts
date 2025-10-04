@@ -133,7 +133,8 @@ export function parseQuery(queryStr: string): QueryObject {
 export function shape<T>(
   data: T,
   query: string | QueryObject,
-  rootData?: any
+  rootData?: any,
+  contextKey?: string // 👈 Added to handle nested computed fields
 ): any {
   const queryObj: QueryObject =
     typeof query === "string" ? parseQuery(query) : query;
@@ -144,7 +145,7 @@ export function shape<T>(
   for (const key in queryObj) {
     const field = queryObj[key];
 
-    // Directive objects (nested, filter, skip)
+    // --- 1️⃣ Directives (nested, filter, skip)
     if (isDirectiveObject(field)) {
       if (field.skipIf && evalExpression(field.skipIf, { ...root, ...data })) {
         result[key] = null;
@@ -167,44 +168,53 @@ export function shape<T>(
           );
         }
         result[key] = arrData.map((item) =>
-          shape(item, field.nested || {}, root)
+          shape(item, field.nested || {}, root, key)
         );
       } else if (typeof value === "object" && value !== null) {
-        result[key] = shape(value, field.nested || {}, root);
+        result[key] = shape(value, field.nested || {}, root, key);
       } else {
         result[key] = value ?? null;
       }
       continue;
     }
 
-    // Computed expression or alias
+    // --- 2️⃣ Computed or aliased fields
     if (typeof field === "string") {
       const simplePathRegex = /^[\w.]+$/;
+
       if (simplePathRegex.test(field)) {
         result[key] = getByPath(data, field) ?? null;
       } else {
-        result[key] = evalExpression(field, { ...root, ...data });
+        const evalScope = { ...root, ...data };
+
+        // 👇 Inject current context (e.g. manager)
+        if (contextKey) evalScope[contextKey] = data;
+
+        // 👇 Allow access via "this"
+        evalScope.this = data;
+
+        result[key] = evalExpression(field, evalScope);
       }
       continue;
     }
 
-    // Function field
+    // --- 3️⃣ Function fields
     if (typeof field === "function") {
       result[key] = field(data);
       continue;
     }
 
-    // Nested object
+    // --- 4️⃣ Nested object fields
     if (typeof field === "object" && field !== null) {
       let nestedValue = (data as Record<string, any>)[key];
       if (nestedValue === undefined && root !== data)
         nestedValue = (root as Record<string, any>)[key];
       if (nestedValue === undefined) nestedValue = autoResolve(root, key);
-      result[key] = shape(nestedValue, field, root);
+      result[key] = shape(nestedValue, field, root, key);
       continue;
     }
 
-    // Fallback: direct value
+    // --- 5️⃣ Fallback
     result[key] = (data as Record<string, any>)[key] ?? null;
   }
 
