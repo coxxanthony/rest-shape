@@ -69,24 +69,6 @@ export function parseQuery(queryStr: string): QueryObject {
   for (let line of lines) {
     line = line.replace(/,$/, "");
 
-    // Start of nested object
-    if (line.endsWith("{")) {
-      const match = line.match(
-        /^(\w+)(?:\(\s*filter:\s*["'](.+)["']\s*\))?\s*{\s*,?$/
-      );
-      if (!match) continue;
-
-      const key = match[1];
-      const filter = match[2]?.trim();
-      const nested: QueryObject = {};
-      const directive: QueryDirective = { nested };
-      if (filter) directive.filter = filter.trim();
-
-      stack[stack.length - 1].obj[key] = directive;
-      stack.push({ obj: nested });
-      continue;
-    }
-
     // End of nested object
     if (line === "}") {
       if (stack.length > 1) stack.pop();
@@ -96,13 +78,56 @@ export function parseQuery(queryStr: string): QueryObject {
     // Ignore fragment spreads
     if (line.startsWith("...")) continue;
 
-    // Field with optional skip
+    // If this is a nested start (ends with "{"), we must handle possible @skip and filter on the same header line
+    if (line.endsWith("{")) {
+      // Remove trailing "{"
+      let header = line.slice(0, -1).trim();
+
+      // Extract @skip(if: "...")
+      const skipMatch = header.match(/@skip\(if:\s*"(.*)"\)/);
+      let skipIf: string | undefined;
+      if (skipMatch) {
+        skipIf = skipMatch[1];
+        header = header.replace(skipMatch[0], "").trim();
+      }
+
+      // Extract filter in parentheses: key(filter: "expr")
+      const filterMatch = header.match(
+        /^(\w+)\(\s*filter:\s*["'](.+)["']\s*\)$/
+      );
+      let key: string | undefined;
+      let filter: string | undefined;
+      if (filterMatch) {
+        key = filterMatch[1];
+        filter = filterMatch[2]?.trim();
+      } else {
+        // simple "key {"
+        const m = header.match(/^(\w+)$/);
+        if (!m) {
+          // unrecognized header — skip to be safe
+          continue;
+        }
+        key = m[1];
+      }
+
+      const nested: QueryObject = {};
+      const directive: QueryDirective = { nested };
+      if (filter) directive.filter = filter;
+      if (skipIf) directive.skipIf = skipIf;
+
+      // attach directive to current stack object
+      stack[stack.length - 1].obj[key!] = directive;
+      stack.push({ obj: nested });
+      continue;
+    }
+
+    // Field with optional skip (single-line field)
     const skipMatch = line.match(/@skip\(if:\s*"(.*)"\)/);
-    let skipIf: string | undefined;
+    let skipIfSingle: string | undefined;
     let fieldLine = line;
     if (skipMatch) {
-      skipIf = skipMatch[1];
-      fieldLine = line.replace(/@skip\(if:\s*".*"\)/, "").trim();
+      skipIfSingle = skipMatch[1];
+      fieldLine = line.replace(skipMatch[0], "").trim();
     }
 
     // Alias / computed field
@@ -110,8 +135,11 @@ export function parseQuery(queryStr: string): QueryObject {
     if (aliasMatch) {
       const alias = aliasMatch[1];
       const expr = aliasMatch[2];
-      if (skipIf) {
-        stack[stack.length - 1].obj[alias] = { path: expr, skipIf };
+      if (skipIfSingle) {
+        stack[stack.length - 1].obj[alias] = {
+          path: expr,
+          skipIf: skipIfSingle,
+        };
       } else {
         stack[stack.length - 1].obj[alias] = expr;
       }
@@ -119,8 +147,11 @@ export function parseQuery(queryStr: string): QueryObject {
     }
 
     // Simple field
-    if (skipIf) {
-      stack[stack.length - 1].obj[fieldLine] = { path: fieldLine, skipIf };
+    if (skipIfSingle) {
+      stack[stack.length - 1].obj[fieldLine] = {
+        path: fieldLine,
+        skipIf: skipIfSingle,
+      };
     } else {
       stack[stack.length - 1].obj[fieldLine] = fieldLine;
     }
@@ -134,7 +165,7 @@ export function shape<T>(
   data: T,
   query: string | QueryObject,
   rootData?: any,
-  contextKey?: string // 👈 Added to handle nested computed fields
+  contextKey?: string // 👈 keep to propagate parent key for evalScope
 ): any {
   const queryObj: QueryObject =
     typeof query === "string" ? parseQuery(query) : query;
@@ -145,15 +176,28 @@ export function shape<T>(
   for (const key in queryObj) {
     const field = queryObj[key];
 
-    // --- 1️⃣ Directives (nested, filter, skip)
-    // --- 1️⃣ Directives (nested, filter, skip)
     if (isDirectiveObject(field)) {
+      // --- SAFE @skip(if:) evaluation, using propagated contextKey or detecting parent in root
       if (field.skipIf) {
         const evalScope = { ...root, ...data };
-        if (contextKey) evalScope[contextKey] = data;
         evalScope.this = data;
 
-        if (evalExpression(field.skipIf, evalScope)) {
+        const parentKey =
+          contextKey ||
+          Object.keys(root || {}).find(
+            (k) => (root as Record<string, any>)[k] === data
+          );
+        if (parentKey) evalScope[parentKey] = data;
+
+        let shouldSkip = false;
+        try {
+          shouldSkip = !!evalExpression(field.skipIf, evalScope);
+        } catch {
+          shouldSkip = true;
+        }
+
+        if (shouldSkip) {
+          // ensure property exists as null even for nested cases
           result[key] = null;
           continue;
         }
@@ -174,18 +218,23 @@ export function shape<T>(
             (item) => evalExpression(field.filter!, item) === true
           );
         }
-        result[key] = arrData.map((item) =>
-          shape(item, field.nested || {}, root, key)
-        );
+        result[key] = field.nested
+          ? arrData.map((item) =>
+              shape(item, field.nested as QueryObject, root, key)
+            )
+          : arrData;
       } else if (typeof value === "object" && value !== null) {
-        result[key] = shape(value, field.nested || {}, root, key);
+        result[key] = field.nested
+          ? shape(value, field.nested as QueryObject, root, key)
+          : value;
       } else {
         result[key] = value ?? null;
       }
+
       continue;
     }
 
-    // --- 2️⃣ Computed or aliased fields
+    // --- Computed or aliased fields
     if (typeof field === "string") {
       const simplePathRegex = /^[\w.]+$/;
 
@@ -193,35 +242,30 @@ export function shape<T>(
         result[key] = getByPath(data, field) ?? null;
       } else {
         const evalScope = { ...root, ...data };
-
-        // 👇 Inject current context (e.g. manager)
         if (contextKey) evalScope[contextKey] = data;
-
-        // 👇 Allow access via "this"
         evalScope.this = data;
-
         result[key] = evalExpression(field, evalScope);
       }
       continue;
     }
 
-    // --- 3️⃣ Function fields
+    // --- Function fields
     if (typeof field === "function") {
       result[key] = field(data);
       continue;
     }
 
-    // --- 4️⃣ Nested object fields
+    // --- Nested object fields (when the query specified a nested QueryObject directly)
     if (typeof field === "object" && field !== null) {
       let nestedValue = (data as Record<string, any>)[key];
       if (nestedValue === undefined && root !== data)
         nestedValue = (root as Record<string, any>)[key];
       if (nestedValue === undefined) nestedValue = autoResolve(root, key);
-      result[key] = shape(nestedValue, field, root, key);
+      result[key] = shape(nestedValue, field as QueryObject, root, key);
       continue;
     }
 
-    // --- 5️⃣ Fallback
+    // --- Fallback
     result[key] = (data as Record<string, any>)[key] ?? null;
   }
 
