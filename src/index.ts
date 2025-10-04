@@ -141,14 +141,15 @@ export function shape<T>(
 
     // Directive objects (nested, filter, skip)
     if (isDirectiveObject(field)) {
-      if (field.skipIf && evalExpression(field.skipIf, data)) {
+      if (field.skipIf && evalExpression(field.skipIf, { ...root, ...data })) {
         result[key] = null;
         continue;
       }
 
       let value = field.path
-        ? getByPath(data, field.path)
+        ? evalExpression(field.path, { ...root, ...data })
         : (data as Record<string, any>)[key];
+
       if (value === undefined && root !== data)
         value = (root as Record<string, any>)[key];
       if (value === undefined) value = autoResolve(root, key);

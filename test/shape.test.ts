@@ -117,7 +117,7 @@ posts(filter: "status === 'draft'") {
     expect(result.nonExist).toBeNull();
   });
 
-  // --- 6️⃣ computed fields inside array ---
+  // --- 6️⃣ computed fields inside array --- - Done
   it("should handle computed fields inside arrays", () => {
     const query = `
   posts {
@@ -244,8 +244,7 @@ posts(filter: "status === 'draft'") {
   `;
     const shaped = shape(
       { user: data.user, department: data.departments[0] },
-      query,
-      { data }
+      query
     );
     expect(shaped).toEqual({
       user: {
@@ -277,8 +276,7 @@ posts(filter: "status === 'draft'") {
   `;
     const shaped = shape(
       { user: data.user, department: data.departments[2] },
-      query,
-      { data }
+      query
     );
     expect(shaped).toEqual({
       user: {
@@ -365,8 +363,7 @@ posts(filter: "status === 'draft'") {
   `;
     const shaped = shape(
       { user: data.user, department: data.departments[0] },
-      query,
-      { data }
+      query
     );
     expect(shaped).toEqual({
       user: {
@@ -442,8 +439,7 @@ posts(filter: "status === 'draft'") {
   `;
     const shaped = shape(
       { user: data.user, department: data.departments[0], posts: data.posts },
-      query,
-      { data }
+      query
     );
     expect(shaped).toEqual({
       user: {
