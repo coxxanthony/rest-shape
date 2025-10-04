@@ -67,8 +67,9 @@ export function parseQuery(queryStr: string): QueryObject {
   const stack: { obj: QueryObject }[] = [{ obj }];
 
   for (let line of lines) {
-    line = line.replace(/,$/, ""); // Remove trailing comma
+    line = line.replace(/,$/, "");
 
+    // Start of nested object
     if (line.endsWith("{")) {
       const match = line.match(
         /^(\w+)(?:\(\s*filter:\s*["'](.+)["']\s*\))?\s*{\s*,?$/
@@ -86,10 +87,14 @@ export function parseQuery(queryStr: string): QueryObject {
       continue;
     }
 
+    // End of nested object
     if (line === "}") {
-      stack.pop();
+      if (stack.length > 1) stack.pop();
       continue;
     }
+
+    // Ignore fragment spreads
+    if (line.startsWith("...")) continue;
 
     // Field with optional skip
     const skipMatch = line.match(/@skip\(if:\s*"(.*)"\)/);
@@ -100,7 +105,7 @@ export function parseQuery(queryStr: string): QueryObject {
       fieldLine = line.replace(/@skip\(if:\s*".*"\)/, "").trim();
     }
 
-    // Alias or computed field: alias: expr
+    // Alias / computed field
     const aliasMatch = fieldLine.match(/^(\w+)\s*:\s*(.+)$/);
     if (aliasMatch) {
       const alias = aliasMatch[1];
