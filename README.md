@@ -53,8 +53,9 @@ manager {
 `;
 
 const computedFields = {
-  fullName: (d: any) => `${d.user.firstName} ${d.user.lastName}`,
-  fullNameExplicit: (d: any) => `${d.user.firstName} ${d.user.lastName}`,
+  fullName: (d: typeof data) => `${d.user.firstName} ${d.user.lastName}`,
+  fullNameExplicit: (d: typeof data) =>
+    `${d.user.firstName} ${d.user.lastName}`,
 };
 
 const result = shape(data, query, computedFields);
@@ -107,7 +108,8 @@ departmentName: department.name
 
 ```ts
 {
-  fullName: (data) => `${data.user.firstName} ${data.user.lastName}`;
+  fullName: (data: typeof data) =>
+    `${data.user.firstName} ${data.user.lastName}`;
 }
 ```
 
@@ -129,9 +131,7 @@ const query = `
 users {
   id
   name
-  role {
-    title
-  }
+  role: role.title
 }
 `;
 
@@ -145,8 +145,8 @@ console.log(result);
 ```json
 {
   "users": [
-    { "id": 1, "name": "Alice", "role": { "title": "Admin" } },
-    { "id": 2, "name": "Bob", "role": { "title": "User" } }
+    { "id": 1, "name": "Alice", "role": "Admin" },
+    { "id": 2, "name": "Bob", "role": "User" }
   ]
 }
 ```
