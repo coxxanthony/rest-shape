@@ -1,7 +1,3 @@
-Absolutely! Here's a professional and clear `README.md` tailored for your **REST API "shape" utility** that uses GraphQL-style queries:
-
----
-
 # REST Shape
 
 Shape REST API responses using **GraphQL-style queries** in plain JavaScript/TypeScript.
