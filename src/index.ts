@@ -146,10 +146,17 @@ export function shape<T>(
     const field = queryObj[key];
 
     // --- 1️⃣ Directives (nested, filter, skip)
+    // --- 1️⃣ Directives (nested, filter, skip)
     if (isDirectiveObject(field)) {
-      if (field.skipIf && evalExpression(field.skipIf, { ...root, ...data })) {
-        result[key] = null;
-        continue;
+      if (field.skipIf) {
+        const evalScope = { ...root, ...data };
+        if (contextKey) evalScope[contextKey] = data;
+        evalScope.this = data;
+
+        if (evalExpression(field.skipIf, evalScope)) {
+          result[key] = null;
+          continue;
+        }
       }
 
       let value = field.path
