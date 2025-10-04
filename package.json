@@ -1,6 +1,6 @@
 {
   "name": "rest-shape",
-  "version": "1.0.5",
+  "version": "1.0.6",
   "description": "Shape REST API responses using GraphQL-style queries — nested selections, aliases, and computed fields for effortless data formatting.",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
