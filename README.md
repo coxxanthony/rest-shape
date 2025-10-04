@@ -108,7 +108,8 @@ departmentName: department.name
 
 ```ts
 {
-  fullName: (data) => `${data.user.firstName} ${data.user.lastName}`;
+  fullName: (data: typeof data) =>
+    `${data.user.firstName} ${data.user.lastName}`;
 }
 ```
 
