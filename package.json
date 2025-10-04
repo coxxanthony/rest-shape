@@ -1,0 +1,33 @@
+{
+  "name": "rest-shape",
+  "version": "1.0.0",
+  "description": "Shape REST API responses using GraphQL-style queries — nested selections, aliases, and computed fields for effortless data formatting.",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "keywords": [
+    "rest",
+    "api",
+    "graphql",
+    "json",
+    "shape",
+    "transform",
+    "normalize",
+    "data",
+    "typescript",
+    "utility"
+  ],
+  "author": "Coxlee Anthony Hubilla",
+  "license": "MIT",
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch",
+    "test": "vitest"
+  },
+  "devDependencies": {
+    "@types/node": "^24.6.2",
+    "ts-node": "^10.9.2",
+    "tsup": "^8.5.0",
+    "typescript": "^5.9.3",
+    "vitest": "^3.2.4"
+  }
+}
