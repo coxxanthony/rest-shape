@@ -69,21 +69,44 @@ export function parseQuery(queryStr: string): QueryObject {
   for (let line of lines) {
     line = line.replace(/,$/, "");
 
-    // End of nested object
+    // --- ✅ Handle inline blocks: e.g. "user { name }" or "posts(filter: \"expr\") { title }"
+    const inlineBlockMatch = line.match(
+      /^(\w+)(\([^)]*\))?\s*\{\s*([^}]*)\s*\}$/
+    );
+    if (inlineBlockMatch) {
+      const [, key, filterPart, innerFields] = inlineBlockMatch;
+      const nested: QueryObject = {};
+
+      if (innerFields.trim()) {
+        innerFields
+          .split(/\s+/)
+          .filter(Boolean)
+          .forEach((f) => (nested[f] = f));
+      }
+
+      const directive: QueryDirective = { nested };
+      if (filterPart) {
+        const fm = filterPart.match(/filter:\s*["'](.+)["']/);
+        if (fm) directive.filter = fm[1];
+      }
+
+      stack[stack.length - 1].obj[key] = directive;
+      continue;
+    }
+
+    // --- End of nested object
     if (line === "}") {
       if (stack.length > 1) stack.pop();
       continue;
     }
 
-    // Ignore fragment spreads
+    // --- Ignore fragment spreads
     if (line.startsWith("...")) continue;
 
-    // If this is a nested start (ends with "{"), we must handle possible @skip and filter on the same header line
+    // --- Handle multi-line nested blocks
     if (line.endsWith("{")) {
-      // Remove trailing "{"
       let header = line.slice(0, -1).trim();
 
-      // Extract @skip(if: "...")
       const skipMatch = header.match(/@skip\(if:\s*"(.*)"\)/);
       let skipIf: string | undefined;
       if (skipMatch) {
@@ -91,7 +114,6 @@ export function parseQuery(queryStr: string): QueryObject {
         header = header.replace(skipMatch[0], "").trim();
       }
 
-      // Extract filter in parentheses: key(filter: "expr")
       const filterMatch = header.match(
         /^(\w+)\(\s*filter:\s*["'](.+)["']\s*\)$/
       );
@@ -101,12 +123,8 @@ export function parseQuery(queryStr: string): QueryObject {
         key = filterMatch[1];
         filter = filterMatch[2]?.trim();
       } else {
-        // simple "key {"
         const m = header.match(/^(\w+)$/);
-        if (!m) {
-          // unrecognized header — skip to be safe
-          continue;
-        }
+        if (!m) continue;
         key = m[1];
       }
 
@@ -115,13 +133,12 @@ export function parseQuery(queryStr: string): QueryObject {
       if (filter) directive.filter = filter;
       if (skipIf) directive.skipIf = skipIf;
 
-      // attach directive to current stack object
       stack[stack.length - 1].obj[key!] = directive;
       stack.push({ obj: nested });
       continue;
     }
 
-    // Field with optional skip (single-line field)
+    // --- Single-line field with optional skip
     const skipMatch = line.match(/@skip\(if:\s*"(.*)"\)/);
     let skipIfSingle: string | undefined;
     let fieldLine = line;
@@ -130,7 +147,7 @@ export function parseQuery(queryStr: string): QueryObject {
       fieldLine = line.replace(skipMatch[0], "").trim();
     }
 
-    // Alias / computed field
+    // --- Alias or computed field
     const aliasMatch = fieldLine.match(/^(\w+)\s*:\s*(.+)$/);
     if (aliasMatch) {
       const alias = aliasMatch[1];
@@ -146,7 +163,7 @@ export function parseQuery(queryStr: string): QueryObject {
       continue;
     }
 
-    // Simple field
+    // --- Simple field
     if (skipIfSingle) {
       stack[stack.length - 1].obj[fieldLine] = {
         path: fieldLine,
@@ -165,7 +182,7 @@ export function shape<T>(
   data: T,
   query: string | QueryObject,
   rootData?: any,
-  contextKey?: string // 👈 keep to propagate parent key for evalScope
+  contextKey?: string
 ): any {
   const queryObj: QueryObject =
     typeof query === "string" ? parseQuery(query) : query;
@@ -176,18 +193,21 @@ export function shape<T>(
   for (const key in queryObj) {
     const field = queryObj[key];
 
-    if (isDirectiveObject(field)) {
-      // --- SAFE @skip(if:) evaluation, using propagated contextKey or detecting parent in root
-      if (field.skipIf) {
-        const evalScope = { ...root, ...data };
-        evalScope.this = data;
+    // ✅ Support multiple root objects
+    const targetData =
+      root === data && (data as any)[key] !== undefined
+        ? (data as any)[key]
+        : data;
 
+    if (isDirectiveObject(field)) {
+      if (field.skipIf) {
+        const evalScope = { ...root, ...targetData, this: targetData };
         const parentKey =
           contextKey ||
           Object.keys(root || {}).find(
-            (k) => (root as Record<string, any>)[k] === data
+            (k) => (root as Record<string, any>)[k] === targetData
           );
-        if (parentKey) evalScope[parentKey] = data;
+        if (parentKey) evalScope[parentKey] = targetData;
 
         let shouldSkip = false;
         try {
@@ -197,17 +217,16 @@ export function shape<T>(
         }
 
         if (shouldSkip) {
-          // ensure property exists as null even for nested cases
           result[key] = null;
           continue;
         }
       }
 
       let value = field.path
-        ? evalExpression(field.path, { ...root, ...data })
-        : (data as Record<string, any>)[key];
+        ? evalExpression(field.path, { ...root, ...targetData })
+        : (targetData as Record<string, any>)[key];
 
-      if (value === undefined && root !== data)
+      if (value === undefined && root !== targetData)
         value = (root as Record<string, any>)[key];
       if (value === undefined) value = autoResolve(root, key);
 
@@ -234,39 +253,33 @@ export function shape<T>(
       continue;
     }
 
-    // --- Computed or aliased fields
     if (typeof field === "string") {
       const simplePathRegex = /^[\w.]+$/;
-
       if (simplePathRegex.test(field)) {
-        result[key] = getByPath(data, field) ?? null;
+        result[key] = getByPath(targetData, field) ?? null;
       } else {
-        const evalScope = { ...root, ...data };
-        if (contextKey) evalScope[contextKey] = data;
-        evalScope.this = data;
+        const evalScope = { ...root, ...targetData, this: targetData };
+        if (contextKey) evalScope[contextKey] = targetData;
         result[key] = evalExpression(field, evalScope);
       }
       continue;
     }
 
-    // --- Function fields
     if (typeof field === "function") {
-      result[key] = field(data);
+      result[key] = field(targetData);
       continue;
     }
 
-    // --- Nested object fields (when the query specified a nested QueryObject directly)
     if (typeof field === "object" && field !== null) {
-      let nestedValue = (data as Record<string, any>)[key];
-      if (nestedValue === undefined && root !== data)
+      let nestedValue = (targetData as Record<string, any>)[key];
+      if (nestedValue === undefined && root !== targetData)
         nestedValue = (root as Record<string, any>)[key];
       if (nestedValue === undefined) nestedValue = autoResolve(root, key);
       result[key] = shape(nestedValue, field as QueryObject, root, key);
       continue;
     }
 
-    // --- Fallback
-    result[key] = (data as Record<string, any>)[key] ?? null;
+    result[key] = (targetData as Record<string, any>)[key] ?? null;
   }
 
   return result;
