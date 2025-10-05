@@ -14,7 +14,8 @@
     "normalize",
     "data",
     "typescript",
-    "utility"
+    "utility",
+    "GraphQL-like"
   ],
   "author": "Coxlee Anthony Hubilla <https://github.com/coxxanthony>",
   "license": "MIT",

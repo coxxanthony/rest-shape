@@ -2,7 +2,7 @@
 
 Shape REST API responses using **GraphQL-style queries** in plain JavaScript.
 
-This utility allows you to **pick, transform, reshape, and compute** API responses declaratively.
+This utility allows you to **pick, transform, reshape, and compute** API responses declaratively, with full support for directives, default values, filtering, transformations, and fragments.
 
 ---
 
@@ -12,37 +12,26 @@ This utility allows you to **pick, transform, reshape, and compute** API respons
 - Explicit mapping using **dot-paths**
 - Computed fields with functions or inline JS expressions
 - Recursive shaping of nested objects and arrays
-- Graceful fallback: missing fields return `null`
 - Conditional skip fields with `@skip(if: "...")`
+- Conditional include fields with `@include(if: "...")`
 - Filter arrays via `filter: "..."` expressions
+- Limit / skip array results using `limit` and `skip`
+- Default values using `||` or `@default(value: "...")`
+- Apply transformations using `@transform(fn: "...")`
 - Support for **fragments** (`...fragmentName`)
-- Default values using `||`
+- Graceful fallback: missing fields return `null`
 
 ---
 
 ## Installation
 
-Install **rest-shape** using your preferred package manager:
-
-### npm
-
 ```bash
 npm install rest-shape
-```
-
-### Yarn
-
-```bash
+# or
 yarn add rest-shape
-```
-
-### pnpm
-
-```bash
+# or
 pnpm add rest-shape
 ```
-
-After installation, import it in your project:
 
 ```js
 // CommonJS
@@ -54,13 +43,9 @@ import { shape } from "rest-shape";
 
 ---
 
-## Usage
-
-### Basic Example
+## Basic Usage
 
 ```js
-const { shape } = require("rest-shape");
-
 const data = {
   user: { firstName: "John", lastName: "Doe" },
   department: {
@@ -81,8 +66,7 @@ const computedFields = {
   fullName: (data) => `${data.user.firstName} ${data.user.lastName}`,
 };
 
-const result = shape(data, query, computedFields);
-
+const result = shape(data, query, undefined, data);
 console.log(result);
 ```
 
@@ -101,58 +85,30 @@ console.log(result);
 
 ---
 
-## Query Syntax
+## Examples with Input Data and Output
 
-REST Shape uses **GraphQL-style queries** to pick, transform, and compute fields from your data. Queries are **plain strings** and can include:
+### 1. Nested Objects
 
-- **Aliases / explicit mapping**
-- **Nested objects**
-- **Arrays and filters**
-- **Computed fields**
-- **Skip directives**
-- **Fragments**
-- **Default fallbacks using `||`**
+**Data Example:**
 
----
-
-### 1. Selecting Basic Fields
-
-```graphql
-user {
-  name
-  email
-}
+```js
+const data = {
+  user: {
+    department: {
+      name: "Engineering",
+      manager: {
+        name: "Alex Johnson",
+        email: "alex.johnson@example.com",
+        role: "CTO",
+      },
+      location: "New York",
+    },
+    age: 30,
+  },
+};
 ```
 
-**Result:**
-
-```json
-{
-  "user": { "name": "John", "email": "john@example.com" }
-}
-```
-
----
-
-### 2. Aliases / Explicit Paths
-
-```graphql
-fullName: user.firstName + " " + user.lastName
-mail: user.email
-```
-
-**Result:**
-
-```json
-{
-  "fullName": "John Doe",
-  "mail": "john@example.com"
-}
-```
-
----
-
-### 3. Nested Objects
+**Query:**
 
 ```graphql
 user {
@@ -166,14 +122,14 @@ user {
 }
 ```
 
-**Result:**
+**Output:**
 
 ```json
 {
   "user": {
     "department": {
       "name": "Engineering",
-      "manager": { "name": "Alex", "email": "alex@example.com" }
+      "manager": { "name": "Alex Johnson", "email": "alex.johnson@example.com" }
     }
   }
 }
@@ -181,86 +137,139 @@ user {
 
 ---
 
-### 4. Arrays and Filters
+### 2. Conditional Skip / Include
+
+**Data Example:**
+
+```js
+const data = {
+  user: {
+    email: "john@example.com",
+    phone: "123-456",
+    isGuest: true,
+    isActive: false,
+  },
+};
+```
+
+**Query:**
 
 ```graphql
-posts(filter: "status === 'published'") {
+email @skip(if: "user.isGuest")
+phone @include(if: "user.isActive")
+```
+
+**Output:**
+
+```json
+{
+  "email": null,
+  "phone": null
+}
+```
+
+---
+
+### 3. Default Fallbacks
+
+**Data Example:**
+
+```js
+const data = {
+  user: { phone: null, backupPhone: "987-654", email: undefined },
+};
+```
+
+**Query:**
+
+```graphql
+phone: phone || backupPhone || "N/A"
+email @default(value: "no-email@example.com")
+```
+
+**Output:**
+
+```json
+{
+  "phone": "987-654",
+  "email": "no-email@example.com"
+}
+```
+
+---
+
+### 4. Transformations
+
+**Data Example:**
+
+```js
+const data = { firstName: "John", lastName: "Doe" };
+```
+
+**Query:**
+
+```graphql
+fullName: firstName + " " + lastName @transform(fn: "value.toUpperCase()")
+```
+
+**Output:**
+
+```json
+{
+  "fullName": "JOHN DOE"
+}
+```
+
+---
+
+### 5. Arrays with Filters, Limit, and Skip
+
+**Data Example:**
+
+```js
+const data = {
+  posts: [
+    { title: "Post 1", status: "published", likes: 120 },
+    { title: "Post 2", status: "published", likes: 50 },
+    { title: "Post 3", status: "draft", likes: 10 },
+  ],
+};
+```
+
+**Query:**
+
+```graphql
+posts(filter: "status === 'published'", limit: 2, skip: 1) {
   title
   likes
 }
 ```
 
-**Result:**
+**Output:**
 
 ```json
 {
-  "posts": [
-    { "title": "Post 1", "likes": 120 },
-    { "title": "Post 3", "likes": 50 }
-  ]
+  "posts": [{ "title": "Post 2", "likes": 50 }]
 }
 ```
 
 ---
 
-### 5. Computed Fields
+### 6. Fragments
 
-#### Inline JS Expressions
-
-```graphql
-user {
-  initials: firstName[0] + "." + lastName[0] + "."
-  managerEmail: department?.manager?.email
-}
-```
-
-#### Using `computedFields` Object
+**Data Example:**
 
 ```js
-const computedFields = {
-  fullName: (data) => `${data.user.firstName} ${data.user.lastName}`,
+const data = {
+  user: {
+    department: {
+      manager: { name: "Alex", email: "alex@example.com", role: "CTO" },
+    },
+  },
 };
 ```
 
----
-
-### 6. Conditional Skip Fields
-
-```graphql
-user {
-  email @skip(if: "user.isGuest === true")
-}
-```
-
-**Result when `user.isGuest === true`:**
-
-```json
-{
-  "user": { "email": null }
-}
-```
-
----
-
-### 7. Default Fallbacks Using `||`
-
-```graphql
-user {
-  phone: phone || "N/A"
-}
-```
-
-Supports multiple fallbacks:
-
-```graphql
-user {
-  phone: phone || backupPhone || "N/A"
-}
-```
-
----
-
-### 8. Fragments
+**Query:**
 
 ```graphql
 user {
@@ -272,50 +281,87 @@ user {
 }
 ```
 
+**Fragments Object:**
+
 ```js
-const fragments = {
-  managerFields: { name: "name", email: "email" },
-};
+const fragments = { managerFields: { name: "name", email: "email" } };
 ```
 
-- Multiple fragments can be merged at the same level.
+**Output:**
+
+```json
+{
+  "user": {
+    "department": {
+      "manager": { "name": "Alex", "email": "alex@example.com" }
+    }
+  }
+}
+```
 
 ---
 
-### 9. Full Example (Realistic API Response)
+### 7. Computed Fields and Optional Chaining
+
+**Data Example:**
+
+```js
+const data = {
+  firstName: "John",
+  lastName: "Doe",
+  department: { manager: { email: "alex@example.com" } },
+};
+```
+
+**Query:**
+
+```graphql
+initials: firstName[0] + "." + lastName[0] + "."
+managerEmail: department?.manager?.email
+```
+
+**Output:**
+
+```json
+{
+  "initials": "J.D.",
+  "managerEmail": "alex@example.com"
+}
+```
+
+---
+
+### 8. Full Example (Complex)
+
+**Data Example:**
 
 ```js
 const data = {
   user: {
-    id: 1,
     firstName: "John",
     lastName: "Doe",
-    email: "john@example.com",
     phone: null,
     isGuest: false,
     department: {
-      id: 10,
       name: "Engineering",
-      manager: {
-        id: 100,
-        name: "Alex Johnson",
-        email: "alex.johnson@example.com",
-      },
+      manager: { name: "Alex Johnson", email: "alex@example.com" },
     },
     projects: [
-      { id: 1001, title: "API Migration", status: "active" },
-      { id: 1002, title: "Frontend Rewrite", status: "completed" },
+      { title: "API Migration", status: "active" },
+      { title: "Frontend Rewrite", status: "completed" },
     ],
   },
   posts: [
-    { id: 501, title: "Post 1", status: "published", likes: 120 },
-    { id: 502, title: "Post 2", status: "draft", likes: 30 },
-    { id: 503, title: "Post 3", status: "published", likes: 50 },
+    { title: "Post 1", status: "published", likes: 120 },
+    { title: "Post 2", status: "draft", likes: 30 },
+    { title: "Post 3", status: "published", likes: 50 },
   ],
-  settings: { theme: "dark", app: "DemoApp" },
 };
+```
 
-const query = `
+**Query:**
+
+```graphql
 user {
   fullName: firstName + " " + lastName
   phone: phone || "N/A"
@@ -334,11 +380,6 @@ posts(filter: "status === 'published'") {
   title
   isPopular: likes > 100
 }
-`;
-
-const result = shape(data, query);
-
-console.log(result);
 ```
 
 **Output:**
@@ -350,7 +391,7 @@ console.log(result);
     "phone": "N/A",
     "department": {
       "name": "Engineering",
-      "manager": { "name": "Alex Johnson", "email": "alex.johnson@example.com" }
+      "manager": { "name": "Alex Johnson", "email": "alex@example.com" }
     },
     "projects": [{ "title": "API Migration" }]
   },
@@ -363,36 +404,137 @@ console.log(result);
 
 ---
 
-## Handling Edge Cases
+### 9. Handling Edge Cases (with Examples)
 
-- Missing or undefined fields → `null`
-- Empty arrays → `[]`
-- Malformed queries → returns empty object instead of crashing
-- Invalid expressions → evaluated as `null`
+#### Missing or Undefined Fields
+
+**Data:**
+
+```js
+const data = { user: { name: "John" } };
+```
+
+**Query:**
+
+```graphql
+user {
+  name
+  email
+}
+```
+
+**Output:**
+
+```json
+{
+  "user": {
+    "name": "John",
+    "email": null
+  }
+}
+```
 
 ---
 
-## Query Syntax Cheat Sheet
+#### Empty Arrays
 
-| Syntax                    | Description                      | Example                                            |                         |               |     |        |
-| ------------------------- | -------------------------------- | -------------------------------------------------- | ----------------------- | ------------- | --- | ------ |
-| `fieldName`               | Pick a field directly            | `name` → `{ "name": "John" }`                      |                         |               |     |        |
-| `alias: path`             | Rename a field or map via path   | `fullName: user.firstName + " " + user.lastName`   |                         |               |     |        |
-| `{ ... }`                 | Nested object selection          | `department { name manager { name } }`             |                         |               |     |        |
-| `filter: "expression"`    | Filter arrays with JS expression | `posts(filter: "status === 'published') { title }` |                         |               |     |        |
-| `@skip(if: "expression")` | Conditionally skip a field       | `email @skip(if: "user.isGuest")`                  |                         |               |     |        |
-| `                         |                                  | `                                                  | Default fallback values | `phone: phone |     | "N/A"` |
-| `...fragmentName`         | Merge reusable fragments         | `manager { ...managerFields }`                     |                         |               |     |        |
-| `computed fields`         | JS expressions inline            | `initials: firstName[0] + "." + lastName[0] + "."` |                         |               |     |        |
-| `?` / optional chaining   | Safe access to nested fields     | `managerEmail: department?.manager?.email`         |                         |               |     |        |
+**Data:**
+
+```js
+const data = { posts: [] };
+```
+
+**Query:**
+
+```graphql
+posts {
+  title
+}
+```
+
+**Output:**
+
+```json
+{
+  "posts": []
+}
+```
+
+---
+
+#### Malformed Queries
+
+**Data:**
+
+```js
+const data = { user: { name: "John" } };
+```
+
+**Query (malformed):**
+
+```graphql
+user {
+  name
+  invalidSyntax
+```
+
+**Output:**
+
+```json
+{}
+```
+
+---
+
+#### Invalid Expressions
+
+**Data:**
+
+```js
+const data = { a: 5 };
+```
+
+**Query:**
+
+```graphql
+result: a + b
+```
+
+**Output:**
+
+```json
+{
+  "result": null
+}
+```
+
+---
+
+### 10. Query Syntax Cheat Sheet (with Data → Query → Output)
+
+| Syntax / Directive     | Example Data                                           | Query / Directive                              | Output                                |
+| ---------------------- | ------------------------------------------------------ | ---------------------------------------------- | ------------------------------------- |
+| `fieldName`            | `{ name: "John" }`                                     | `name`                                         | `{ "name": "John" }`                  |
+| `alias: path`          | `{ firstName: "John", lastName: "Doe" }`               | `fullName: firstName + " " + lastName`         | `{ "fullName": "John Doe" }`          |
+| `{ ... }`              | `{ department: { name: "Eng" } }`                      | `department { name }`                          | `{ "department": { "name": "Eng" } }` |
+| `filter: "expression"` | `{ posts: [{status: "draft"}, {status:"published"}] }` | `posts(filter: "status==='published'){title}"` | Only published posts                  |
+| `limit: n`             | Array of 5 items                                       | `items(limit: 2) { id }`                       | First 2 items                         |
+| `skip: n`              | Array of 5 items                                       | `items(skip: 2) { id }`                        | Items from index 2                    |
+| `@skip(if: "...")`     | `{ isGuest: true, email: "x" }`                        | `email @skip(if: "isGuest")`                   | `email: null`                         |
+| `@include(if: "...")`  | `{ isActive: false, phone: "123" }`                    | `phone @include(if: "isActive")`               | `phone: null`                         |
+| `@default              |                                                        |                                                |                                       |
+
+(value: "...")`               |`{ email: undefined }`                       |`email @default(value: "[no-email@example.com](mailto:no-email@example.com)")`      |`"[no-email@example.com](mailto:no-email@example.com)"`|
+|`@transform(fn: "...")`                |`{ firstName: "John" }`                      |`firstName @transform(fn: "value.toUpperCase()")`   |`"JOHN"`|
+|`...fragmentName`                      |`{ manager: { name:"Alex" } }`              |`manager { ...managerFields }`                       |`{ "manager": { "name":"Alex" } }`| | Computed fields / inline JS expressions |`{ firstName: "John", lastName: "Doe" }`   |`initials: firstName[0] + "." + lastName[0] + "."` |`"J.D."`| | Optional chaining                       |`{ department: { manager: { email: "x" }}}`|`managerEmail: department?.manager?.email`          |`"x"` |
 
 ---
 
 ## Installation Notes
 
 - Works in **Node.js** and **browser**
+- Fully supports computed fields, filters, skip/include directives, fragments, transformations, and default fallbacks
 - Missing fields return `null` by default
-- Fully supports computed fields, filters, skip directives, fragments, and default fallbacks
 
 ---
 
