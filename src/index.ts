@@ -122,6 +122,27 @@ export function parseQuery(queryStr: string, rootData?: any): QueryObject {
       continue; // skip further processing of this line
     }
 
+    // Inline default
+    const inlineDefaultMatch = line.match(/@default\(value:\s*["'](.*)["']\)/);
+    if (inlineDefaultMatch) {
+      const defaultValue = inlineDefaultMatch[1];
+      line = line.replace(inlineDefaultMatch[0], "").trim();
+      const fieldName = line;
+      const current = stack[stack.length - 1].obj;
+      current[fieldName] = { default: defaultValue };
+      continue;
+    }
+
+    const transformMatchInline = line.match(
+      /^(\w+)\s*:\s*(\w+)\s+@transform\(fn:\s*"(.*)"\)/
+    );
+    if (transformMatchInline) {
+      const [, alias, path, transformFn] = transformMatchInline;
+      const current = stack[stack.length - 1].obj;
+      current[alias] = { path, transform: transformFn };
+      continue;
+    }
+
     // Fragment spread
     if (line.startsWith("...")) {
       const fragName = line.slice(3).trim();
