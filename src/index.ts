@@ -10,7 +10,8 @@ export type QueryDirective = {
   includeIf?: string;
   nested?: QueryObject;
   filter?: string;
-  default?: any; // support for @default
+  default?: any;
+  transform?: string; // @transform(fn: "...")
 };
 
 /** Type guard for directive objects */
@@ -23,7 +24,8 @@ function isDirectiveObject(field: any): field is QueryDirective {
       "includeIf" in field ||
       "nested" in field ||
       "filter" in field ||
-      "default" in field)
+      "default" in field ||
+      "transform" in field)
   );
 }
 
@@ -60,7 +62,7 @@ function evalExpression(expr: string, data: any) {
   }
 }
 
-/** Parse query string into QueryObject with nested, filter, skip, include, computed fields, fragments, and @default */
+/** Parse query string into QueryObject with directives and nested blocks */
 export function parseQuery(queryStr: string): QueryObject {
   const lines = queryStr
     .split("\n")
@@ -73,14 +75,14 @@ export function parseQuery(queryStr: string): QueryObject {
   for (let line of lines) {
     line = line.replace(/,$/, "");
 
-    // Fragment spreads
+    // Fragment spread
     if (line.startsWith("...")) {
       const fragName = line.slice(3).trim();
       stack[stack.length - 1].obj[`...${fragName}`] = null;
       continue;
     }
 
-    // Inline blocks: user { name } or posts(filter: "...") { title }
+    // Inline block: user { name } or posts(filter: "...") { title }
     const inlineBlockMatch = line.match(
       /^(\w+)(\([^)]*\))?\s*\{\s*([^}]*)\s*\}$/
     );
@@ -102,6 +104,7 @@ export function parseQuery(queryStr: string): QueryObject {
       continue;
     }
 
+    // End block
     if (line === "}") {
       if (stack.length > 1) stack.pop();
       continue;
@@ -151,13 +154,16 @@ export function parseQuery(queryStr: string): QueryObject {
     }
 
     // Single-line field
-    const skipMatchSingle = line.match(/@skip\(if:\s*"(.*)"\)/);
-    const includeMatchSingle = line.match(/@include\(if:\s*"(.*)"\)/);
-    const defaultMatch = line.match(/@default\(value:\s*["'](.+)["']\)/);
-
     let skipIfSingle: string | undefined;
     let includeIfSingle: string | undefined;
     let defaultValue: any = undefined;
+    let transformValue: string | undefined;
+
+    const skipMatchSingle = line.match(/@skip\(if:\s*"(.*)"\)/);
+    const includeMatchSingle = line.match(/@include\(if:\s*"(.*)"\)/);
+    const defaultMatch = line.match(/@default\(value:\s*["'](.+)["']\)/);
+    const transformMatch = line.match(/@transform\(fn:\s*"(.*)"\)/);
+
     let fieldLine = line;
 
     if (skipMatchSingle) {
@@ -172,7 +178,12 @@ export function parseQuery(queryStr: string): QueryObject {
       defaultValue = defaultMatch[1];
       fieldLine = fieldLine.replace(defaultMatch[0], "").trim();
     }
+    if (transformMatch) {
+      transformValue = transformMatch[1];
+      fieldLine = fieldLine.replace(transformMatch[0], "").trim();
+    }
 
+    // Alias
     const aliasMatch = fieldLine.match(/^(\w+)\s*:\s*(.+)$/);
     if (aliasMatch) {
       const alias = aliasMatch[1];
@@ -182,16 +193,24 @@ export function parseQuery(queryStr: string): QueryObject {
         skipIf: skipIfSingle,
         includeIf: includeIfSingle,
         default: defaultValue,
+        transform: transformValue,
       };
       continue;
     }
 
-    if (skipIfSingle || includeIfSingle || defaultValue !== undefined) {
+    // Normal field
+    if (
+      skipIfSingle ||
+      includeIfSingle ||
+      defaultValue !== undefined ||
+      transformValue
+    ) {
       stack[stack.length - 1].obj[fieldLine] = {
         path: fieldLine,
         skipIf: skipIfSingle,
         includeIf: includeIfSingle,
         default: defaultValue,
+        transform: transformValue,
       };
     } else {
       stack[stack.length - 1].obj[fieldLine] = fieldLine;
@@ -201,7 +220,7 @@ export function parseQuery(queryStr: string): QueryObject {
   return obj;
 }
 
-/** Shape data according to query */
+/** Shape data according to query with full directive support */
 export function shape<T>(
   data: T,
   query: string | QueryObject,
@@ -222,7 +241,6 @@ export function shape<T>(
       root === data && (data as any)[key] !== undefined
         ? (data as any)[key]
         : data;
-
     const safeTarget = targetData ?? {};
 
     // Fragment spread
@@ -241,21 +259,16 @@ export function shape<T>(
       continue;
     }
 
-    // Directive objects
+    // Directive object
     if (isDirectiveObject(field)) {
       const evalScope = { ...root, ...safeTarget, this: safeTarget };
       if (contextKey) evalScope[contextKey] = safeTarget;
 
-      // skip/include
       if (field.skipIf && !!evalExpression(field.skipIf, evalScope)) {
         result[key] = null;
         continue;
       }
-      if (
-        field.includeIf &&
-        field.includeIf &&
-        !evalExpression(field.includeIf, evalScope)
-      ) {
+      if (field.includeIf && !evalExpression(field.includeIf, evalScope)) {
         result[key] = null;
         continue;
       }
@@ -288,6 +301,19 @@ export function shape<T>(
         value = field.default;
       }
 
+      // Apply @transform
+      if (field.transform && value != null) {
+        try {
+          value = Function(
+            "value",
+            "data",
+            `with(data){ return ${field.transform} }`
+          )(value, safeTarget);
+        } catch {
+          // ignore transform errors
+        }
+      }
+
       // Arrays
       if (Array.isArray(value)) {
         let arrData = value;
@@ -311,7 +337,7 @@ export function shape<T>(
       continue;
     }
 
-    // Nested object (non-directive)
+    // Nested object
     if (typeof field === "object" && field !== null) {
       const nestedValue = safeTarget[key] ?? autoResolve(root, key) ?? {};
       result[key] = shape(
