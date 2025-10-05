@@ -117,12 +117,33 @@ describe("rest-shape vNext features", () => {
     expect(result.posts).toEqual([{ title: "Hello World" }]);
   });
 
+  it("should combine data sources", () => {
+    const github = { user: { login: "octocat", followers: 1000 } };
+    const sample = "sample";
+    const data = {
+      ...github,
+      user: { ...github.user, sample }, // merge sample into user
+    };
+
+    const query = `
+    user { name: login followers sample }
+  `;
+
+    const result = shape(data, query);
+
+    expect(result.user).toEqual({
+      name: "octocat",
+      followers: 1000,
+      sample: "sample",
+    });
+  });
+
   // ======================================================
   // 🟢 ERROR HANDLING
   // ======================================================
-  //   it("should handle invalid expressions in dev mode gracefully", () => {
-  //     const query = `broken: user.nonexistent.prop`;
-  //     const result = shape(data, query);
-  //     expect(result.broken).toBeNull();
-  //   });
+  it("should handle invalid expressions in dev mode gracefully", () => {
+    const query = `broken: user.nonexistent.prop`;
+    const result = shape(data, query);
+    expect(result.broken).toBeNull();
+  });
 });
