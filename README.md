@@ -512,23 +512,21 @@ result: a + b
 
 ### 10. Query Syntax Cheat Sheet (with Data → Query → Output)
 
-| Syntax / Directive     | Example Data                                           | Query / Directive                              | Output                                |
-| ---------------------- | ------------------------------------------------------ | ---------------------------------------------- | ------------------------------------- |
-| `fieldName`            | `{ name: "John" }`                                     | `name`                                         | `{ "name": "John" }`                  |
-| `alias: path`          | `{ firstName: "John", lastName: "Doe" }`               | `fullName: firstName + " " + lastName`         | `{ "fullName": "John Doe" }`          |
-| `{ ... }`              | `{ department: { name: "Eng" } }`                      | `department { name }`                          | `{ "department": { "name": "Eng" } }` |
-| `filter: "expression"` | `{ posts: [{status: "draft"}, {status:"published"}] }` | `posts(filter: "status==='published'){title}"` | Only published posts                  |
-| `limit: n`             | Array of 5 items                                       | `items(limit: 2) { id }`                       | First 2 items                         |
-| `skip: n`              | Array of 5 items                                       | `items(skip: 2) { id }`                        | Items from index 2                    |
-| `@skip(if: "...")`     | `{ isGuest: true, email: "x" }`                        | `email @skip(if: "isGuest")`                   | `email: null`                         |
-| `@include(if: "...")`  | `{ isActive: false, phone: "123" }`                    | `phone @include(if: "isActive")`               | `phone: null`                         |
-| `@default              |                                                        |                                                |                                       |
-
-(value: "...")`               |`{ email: undefined }`                       |`email @default(value: "[no-email@example.com](mailto:no-email@example.com)")`      |`"[no-email@example.com](mailto:no-email@example.com)"`|
-|`@transform(fn: "...")`                |`{ firstName: "John" }`                      |`firstName @transform(fn: "value.toUpperCase()")`   |`"JOHN"`|
-|`...fragmentName`                      |`{ manager: { name:"Alex" } }`              |`manager { ...managerFields }`                       |`{ "manager": { "name":"Alex" } }`| | Computed fields / inline JS expressions |`{ firstName: "John", lastName: "Doe" }`   |`initials: firstName[0] + "." + lastName[0] + "."` |`"J.D."`| | Optional chaining                       |`{ department: { manager: { email: "x" }}}`|`managerEmail: department?.manager?.email`          |`"x"` |
-
----
+| Syntax / Directive                      | Example Data                                           | Query / Directive                                  | Output                                |
+| --------------------------------------- | ------------------------------------------------------ | -------------------------------------------------- | ------------------------------------- |
+| `fieldName`                             | `{ name: "John" }`                                     | `name`                                             | `{ "name": "John" }`                  |
+| `alias: path`                           | `{ firstName: "John", lastName: "Doe" }`               | `fullName: firstName + " " + lastName`             | `{ "fullName": "John Doe" }`          |
+| `{ ... }`                               | `{ department: { name: "Eng" } }`                      | `department { name }`                              | `{ "department": { "name": "Eng" } }` |
+| `filter: "expression"`                  | `{ posts: [{status: "draft"}, {status:"published"}] }` | `posts(filter: "status==='published') { title }`   | Only published posts                  |
+| `limit: n`                              | Array of 5 items                                       | `items(limit: 2) { id }`                           | First 2 items                         |
+| `skip: n`                               | Array of 5 items                                       | `items(skip: 2) { id }`                            | Items from index 2                    |
+| `@skip(if: "...")`                      | `{ isGuest: true, email: "x" }`                        | `email @skip(if: "isGuest")`                       | `email: null`                         |
+| `@include(if: "...")`                   | `{ isActive: false, phone: "123" }`                    | `phone @include(if: "isActive")`                   | `phone: null`                         |
+| `@default(value: "...")`                | `{ email: undefined }`                                 | `email @default(value: "no-email@example.com")`    | `"no-email@example.com"`              |
+| `@transform(fn: "...")`                 | `{ firstName: "John" }`                                | `firstName @transform(fn: "value.toUpperCase()")`  | `"JOHN"`                              |
+| `...fragmentName`                       | `{ manager: { name:"Alex" } }`                         | `manager { ...managerFields }`                     | `{ "manager": { "name":"Alex" } }`    |
+| Computed fields / inline JS expressions | `{ firstName: "John", lastName: "Doe" }`               | `initials: firstName[0] + "." + lastName[0] + "."` | `"J.D."`                              |
+| Optional chaining                       | `{ department: { manager: { email: "x" }}}`            | `managerEmail: department?.manager?.email`         | `"x"`                                 |
 
 ## Installation Notes
 
