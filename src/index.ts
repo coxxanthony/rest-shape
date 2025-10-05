@@ -274,6 +274,24 @@ export function shape<T>(
     // --- String fields
     if (typeof field === "string") {
       const simplePathRegex = /^[\w.]+$/;
+
+      // Detect default fallback using `||`
+      if (field.includes("||")) {
+        const parts = field.split("||").map((p) => p.trim());
+        let value = null;
+
+        for (let part of parts) {
+          value =
+            getByPath(targetData, part) ??
+            autoResolve(root, part) ??
+            evalExpression(part, { ...root, ...targetData, this: targetData });
+          if (value !== null && value !== undefined) break;
+        }
+
+        result[key] = value ?? null;
+        continue;
+      }
+
       if (simplePathRegex.test(field)) {
         const value = getByPath(targetData, field) ?? autoResolve(root, field);
         result[key] = value;
