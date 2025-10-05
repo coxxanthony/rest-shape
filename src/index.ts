@@ -7,6 +7,7 @@ export interface QueryObject {
 export type QueryDirective = {
   path?: string;
   skipIf?: string;
+  includeIf?: string;
   nested?: QueryObject;
   filter?: string;
 };
@@ -18,6 +19,7 @@ function isDirectiveObject(field: any): field is QueryDirective {
     field !== null &&
     ("path" in field ||
       "skipIf" in field ||
+      "includeIf" in field ||
       "nested" in field ||
       "filter" in field)
   );
@@ -56,7 +58,7 @@ function evalExpression(expr: string, data: any) {
   }
 }
 
-/** Parse query string into QueryObject with nested, filter, skip, computed fields, and fragment spreads */
+/** Parse query string into QueryObject with nested, filter, skip, include, computed fields, and fragment spreads */
 export function parseQuery(queryStr: string): QueryObject {
   const lines = queryStr
     .split("\n")
@@ -115,6 +117,13 @@ export function parseQuery(queryStr: string): QueryObject {
         header = header.replace(skipMatch[0], "").trim();
       }
 
+      const includeMatch = header.match(/@include\(if:\s*"(.*)"\)/);
+      let includeIf: string | undefined;
+      if (includeMatch) {
+        includeIf = includeMatch[1];
+        header = header.replace(includeMatch[0], "").trim();
+      }
+
       const filterMatch = header.match(
         /^(\w+)\(\s*filter:\s*["'](.+)["']\s*\)$/
       );
@@ -133,6 +142,7 @@ export function parseQuery(queryStr: string): QueryObject {
       const directive: QueryDirective = { nested };
       if (filter) directive.filter = filter;
       if (skipIf) directive.skipIf = skipIf;
+      if (includeIf) directive.includeIf = includeIf;
 
       stack[stack.length - 1].obj[key!] = directive;
       stack.push({ obj: nested });
@@ -140,12 +150,18 @@ export function parseQuery(queryStr: string): QueryObject {
     }
 
     // --- Single-line field
-    const skipMatch = line.match(/@skip\(if:\s*"(.*)"\)/);
+    const skipMatchSingle = line.match(/@skip\(if:\s*"(.*)"\)/);
+    const includeMatchSingle = line.match(/@include\(if:\s*"(.*)"\)/);
     let skipIfSingle: string | undefined;
+    let includeIfSingle: string | undefined;
     let fieldLine = line;
-    if (skipMatch) {
-      skipIfSingle = skipMatch[1];
-      fieldLine = line.replace(skipMatch[0], "").trim();
+    if (skipMatchSingle) {
+      skipIfSingle = skipMatchSingle[1];
+      fieldLine = fieldLine.replace(skipMatchSingle[0], "").trim();
+    }
+    if (includeMatchSingle) {
+      includeIfSingle = includeMatchSingle[1];
+      fieldLine = fieldLine.replace(includeMatchSingle[0], "").trim();
     }
 
     // --- Alias / computed field
@@ -153,22 +169,20 @@ export function parseQuery(queryStr: string): QueryObject {
     if (aliasMatch) {
       const alias = aliasMatch[1];
       const expr = aliasMatch[2];
-      if (skipIfSingle) {
-        stack[stack.length - 1].obj[alias] = {
-          path: expr,
-          skipIf: skipIfSingle,
-        };
-      } else {
-        stack[stack.length - 1].obj[alias] = expr;
-      }
+      stack[stack.length - 1].obj[alias] = {
+        path: expr,
+        skipIf: skipIfSingle,
+        includeIf: includeIfSingle,
+      };
       continue;
     }
 
     // --- Simple field
-    if (skipIfSingle) {
+    if (skipIfSingle || includeIfSingle) {
       stack[stack.length - 1].obj[fieldLine] = {
         path: fieldLine,
         skipIf: skipIfSingle,
+        includeIf: includeIfSingle,
       };
     } else {
       stack[stack.length - 1].obj[fieldLine] = fieldLine;
@@ -218,31 +232,68 @@ export function shape<T>(
 
     // --- Directive objects
     if (isDirectiveObject(field)) {
-      if (field.skipIf) {
-        const evalScope = { ...root, ...targetData, this: targetData };
-        const parentKey =
-          contextKey ||
-          Object.keys(root || {}).find(
-            (k) => (root as Record<string, any>)[k] === targetData
-          );
-        if (parentKey) evalScope[parentKey] = targetData;
+      const evalScope = { ...root, ...targetData, this: targetData };
+      if (contextKey) evalScope[contextKey] = targetData;
 
+      // --- skip
+      if (field.skipIf) {
         let shouldSkip = false;
         try {
           shouldSkip = !!evalExpression(field.skipIf, evalScope);
         } catch {
           shouldSkip = true;
         }
-
         if (shouldSkip) {
           result[key] = null;
           continue;
         }
       }
 
-      let value = field.path
-        ? evalExpression(field.path, { ...root, ...targetData })
-        : (targetData as Record<string, any>)[key];
+      // --- include
+      if (field.includeIf) {
+        let shouldInclude = false;
+        try {
+          shouldInclude = !!evalExpression(field.includeIf, evalScope);
+        } catch {
+          shouldInclude = false;
+        }
+        if (!shouldInclude) {
+          result[key] = null;
+          continue;
+        }
+      }
+
+      // --- handle path with fallback ||
+      let value: any;
+      if (field.path && field.path.includes("||")) {
+        const parts = field.path.split("||").map((p) => p.trim());
+        value = null;
+
+        for (const part of parts) {
+          const stringLiteralMatch = part.match(/^["'](.*)["']$/);
+          if (stringLiteralMatch) {
+            value = stringLiteralMatch[1];
+            break;
+          }
+
+          value = getByPath(targetData, part);
+          if (value != null) break;
+
+          value = autoResolve(root, part);
+          if (value != null) break;
+
+          try {
+            value = evalExpression(part, evalScope);
+          } catch {
+            value = null;
+          }
+          if (value != null) break;
+        }
+      } else {
+        value = field.path
+          ? evalExpression(field.path, evalScope)
+          : (targetData as Record<string, any>)[key];
+      }
 
       if (value === undefined && root !== targetData)
         value = (root as Record<string, any>)[key];
@@ -278,14 +329,33 @@ export function shape<T>(
       // Detect default fallback using `||`
       if (field.includes("||")) {
         const parts = field.split("||").map((p) => p.trim());
-        let value = null;
+        let value: any = null;
 
         for (let part of parts) {
-          value =
-            getByPath(targetData, part) ??
-            autoResolve(root, part) ??
-            evalExpression(part, { ...root, ...targetData, this: targetData });
-          if (value !== null && value !== undefined) break;
+          // If it’s a quoted string literal, return it as-is
+          const stringLiteralMatch = part.match(/^["'](.*)["']$/);
+          if (stringLiteralMatch) {
+            value = stringLiteralMatch[1];
+            break;
+          }
+
+          // Try dot-path in targetData
+          value = getByPath(targetData, part);
+          if (value != null) break;
+
+          // Try autoResolve in root
+          value = autoResolve(root, part);
+          if (value != null) break;
+
+          // Try evaluating as expression
+          const evalScope = { ...root, ...targetData, this: targetData };
+          if (contextKey) evalScope[contextKey] = targetData;
+          try {
+            value = evalExpression(part, evalScope);
+          } catch {
+            value = null;
+          }
+          if (value != null) break;
         }
 
         result[key] = value ?? null;
