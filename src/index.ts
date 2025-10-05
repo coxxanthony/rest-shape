@@ -92,7 +92,47 @@ function mergeDeep(target: any, source: any) {
   return target;
 }
 
+function parseArgs(argsStr: string): Record<string, any> {
+  const args: Record<string, any> = {};
+  let current = "";
+  let inQuotes = false;
+  let quoteChar = "";
+
+  for (let i = 0; i < argsStr.length; i++) {
+    const c = argsStr[i];
+    if ((c === '"' || c === "'") && !inQuotes) {
+      inQuotes = true;
+      quoteChar = c;
+      current += c;
+    } else if (c === quoteChar && inQuotes) {
+      inQuotes = false;
+      current += c;
+    } else if (c === "," && !inQuotes) {
+      const [k, v] = current.split(":").map((s) => s.trim());
+      if (k) {
+        if (["limit", "skip"].includes(k)) args[k] = parseInt(v, 10);
+        else args[k] = v.replace(/^["']|["']$/g, "");
+      }
+      current = "";
+    } else {
+      current += c;
+    }
+  }
+
+  // handle last argument
+  if (current) {
+    const [k, v] = current.split(":").map((s) => s.trim());
+    if (k) {
+      if (["limit", "skip"].includes(k)) args[k] = parseInt(v, 10);
+      else args[k] = v.replace(/^["']|["']$/g, "");
+    }
+  }
+
+  return args;
+}
+
 /** Parse query into QueryObject with fragment detection */
+/** Parse query into QueryObject with fragment and directive support */
 export function parseQuery(queryStr: string, rootData?: any): QueryObject {
   const lines = queryStr
     .split("\n")
@@ -105,34 +145,35 @@ export function parseQuery(queryStr: string, rootData?: any): QueryObject {
   for (let line of lines) {
     line = line.replace(/,$/, "").trim();
 
-    // --- NEW: handle skip directive inline on a field ---
+    // --- Inline @skip directive ---
     const skipMatch = line.match(/(\w+)\s+@skip\(if:\s*"(.*)"\)/);
     if (skipMatch) {
       const [, fieldName, skipExpr] = skipMatch;
       const current = stack[stack.length - 1].obj;
       current[fieldName] = { skipIf: skipExpr };
-      continue; // skip further processing of this line
+      continue;
     }
 
+    // --- Inline @include directive ---
     const includeMatch = line.match(/(\w+)\s+@include\(if:\s*"(.*)"\)/);
     if (includeMatch) {
       const [, fieldName, includeExpr] = includeMatch;
       const current = stack[stack.length - 1].obj;
       current[fieldName] = { includeIf: includeExpr };
-      continue; // skip further processing of this line
+      continue;
     }
 
-    // Inline default
+    // --- Inline @default directive ---
     const inlineDefaultMatch = line.match(/@default\(value:\s*["'](.*)["']\)/);
     if (inlineDefaultMatch) {
       const defaultValue = inlineDefaultMatch[1];
       line = line.replace(inlineDefaultMatch[0], "").trim();
-      const fieldName = line;
       const current = stack[stack.length - 1].obj;
-      current[fieldName] = { default: defaultValue };
+      current[line] = { default: defaultValue };
       continue;
     }
 
+    // --- Inline @transform directive ---
     const transformMatchInline = line.match(
       /^(\w+)\s*:\s*(\w+)\s+@transform\(fn:\s*"(.*)"\)/
     );
@@ -143,7 +184,50 @@ export function parseQuery(queryStr: string, rootData?: any): QueryObject {
       continue;
     }
 
-    // Fragment spread
+    const inlineMatch = line.match(/^(\w+)(\([^)]*\))?\s*\{\s*([^}]*)\s*\}$/);
+    if (inlineMatch) {
+      const [, key, argsPart, innerFields] = inlineMatch;
+      const nested: QueryObject = {};
+      const directive: QueryDirective = { nested };
+
+      // --- Parse arguments like limit, skip, filter ---
+      if (argsPart) {
+        const argsStr = argsPart.slice(1, -1).trim(); // remove surrounding ()
+        const args = parseArgs(argsStr);
+        Object.assign(directive, args);
+      }
+
+      // --- Process inner fields normally ---
+      if (innerFields.trim()) {
+        const fieldRegex = /(\.\.\.\w+|\w+\s*:\s*[\w.@\[\]]+|\w+)/g;
+        const matches = innerFields.match(fieldRegex) ?? [];
+        matches.forEach((f) => {
+          if (f.startsWith("...")) {
+            nested.__fragments = nested.__fragments || [];
+            nested.__fragments.push(f.slice(3));
+            return;
+          }
+          const aliasMatch = f.match(/^(\w+)\s*:\s*(.+)$/);
+          if (aliasMatch) {
+            const [_, alias, expr] = aliasMatch;
+            if (expr.includes(".") || expr.includes("[")) {
+              nested[alias] = (data: any, root: any) =>
+                evalNestedField(expr, data, root);
+            } else {
+              nested[alias] = { path: expr };
+            }
+          } else {
+            nested[f.trim()] = f.trim();
+          }
+        });
+      }
+
+      const current = stack[stack.length - 1].obj;
+      current[key] = directive; // attach limit/skip/filter here
+      continue;
+    }
+
+    // --- Fragment spread ---
     if (line.startsWith("...")) {
       const fragName = line.slice(3).trim();
       const current = stack[stack.length - 1].obj;
@@ -152,12 +236,12 @@ export function parseQuery(queryStr: string, rootData?: any): QueryObject {
       continue;
     }
 
-    // Block start
+    // --- Block start handling ---
     if (line.endsWith("{")) {
       let header = line.slice(0, -1).trim();
       const nested: QueryObject = {};
       const directive: QueryDirective = { nested };
-
+      // Handle inline @skip / @include
       const skipMatch = header.match(/@skip\(if:\s*"(.*)"\)/);
       if (skipMatch) {
         directive.skipIf = skipMatch[1];
@@ -169,33 +253,31 @@ export function parseQuery(queryStr: string, rootData?: any): QueryObject {
         header = header.replace(includeMatch[0], "").trim();
       }
 
-      const limitMatch = header.match(/limit:\s*(\d+)/);
-      if (limitMatch) directive.limit = parseInt(limitMatch[1], 10);
-      const skipArgMatch = header.match(/skip:\s*(\d+)/);
-      if (skipArgMatch) directive.skip = parseInt(skipArgMatch[1], 10);
-      const filterMatch = header.match(/filter:\s*["'](.+)["']/);
-      if (filterMatch) directive.filter = filterMatch[1];
-
-      // Match key with optional directives
-      const keyDirectiveMatch = header.match(/^(\w+)(\([^)]+\))?$/);
-      if (keyDirectiveMatch) {
-        const key = keyDirectiveMatch[1];
-        const current = stack[stack.length - 1].obj;
-        current[key] = directive;
+      let key = "";
+      const parenMatch = header.match(/^(\w+)\((.*)\)/);
+      if (parenMatch) {
+        key = parenMatch[1].trim();
+        const argsStr = parenMatch[2].trim();
+        const args = parseArgs(argsStr);
+        Object.assign(directive, args); // attach limit, skip, filter
+      } else {
+        key = header;
       }
 
+      const current = stack[stack.length - 1].obj;
+      current[key] = directive;
+
       stack.push({ obj: nested });
-      directive.nested = nested;
       continue;
     }
 
-    // Block end
+    // --- Block end ---
     if (line === "}") {
       if (stack.length > 1) stack.pop();
       continue;
     }
 
-    // Inline block or normal fields
+    // --- Inline block or normal fields ---
     const current = stack[stack.length - 1].obj;
 
     if (line.includes("{")) {
@@ -215,7 +297,6 @@ export function parseQuery(queryStr: string, rootData?: any): QueryObject {
             const aliasMatch = f.match(/^(\w+)\s*:\s*(.+)$/);
             if (aliasMatch) {
               const [_, alias, expr] = aliasMatch;
-              // Treat "." or "[]" as computed JS expression
               if (expr.includes(".") || expr.includes("[")) {
                 nested[alias] = (data: any, root: any) =>
                   evalNestedField(expr, data, root);
@@ -232,12 +313,11 @@ export function parseQuery(queryStr: string, rootData?: any): QueryObject {
       }
     }
 
-    // Normal field or alias
+    // --- Normal field or alias ---
     const aliasMatch = line.match(/^(\w+)\s*:\s*(.+)$/);
     if (aliasMatch) {
       const [_, alias, expr] = aliasMatch;
       if (expr.includes(".") || expr.includes("[")) {
-        // Computed JS expression
         current[alias] = (data: any) =>
           evalNestedField(expr, data, rootData ?? data);
       } else {
