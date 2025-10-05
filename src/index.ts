@@ -114,6 +114,14 @@ export function parseQuery(queryStr: string, rootData?: any): QueryObject {
       continue; // skip further processing of this line
     }
 
+    const includeMatch = line.match(/(\w+)\s+@include\(if:\s*"(.*)"\)/);
+    if (includeMatch) {
+      const [, fieldName, includeExpr] = includeMatch;
+      const current = stack[stack.length - 1].obj;
+      current[fieldName] = { includeIf: includeExpr };
+      continue; // skip further processing of this line
+    }
+
     // Fragment spread
     if (line.startsWith("...")) {
       const fragName = line.slice(3).trim();
@@ -273,6 +281,20 @@ export function shape<T>(
         }
       }
 
+      // Evaluate includeIf
+      if (field.includeIf) {
+        const shouldInclude = !!evalNestedField(
+          field.includeIf,
+          safeTarget,
+          root
+        );
+        if (!shouldInclude) {
+          result[key] = null;
+          continue;
+        }
+      }
+
+      // Existing logic for path, nested, defaults, transform, arrays...
       if (field.path) {
         const parts = field.path.split("||").map((p) => p.trim());
         for (const part of parts) {

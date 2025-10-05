@@ -113,7 +113,7 @@ describe("rest-shape (GraphQL-like features)", () => {
       user {
         department {
           manager {
-            emailDomain: manager.email.split("@")[1]
+            emailDomain: email.split("@")[1]
           }
         }
       }
