@@ -275,7 +275,8 @@ export function shape<T>(
     if (typeof field === "string") {
       const simplePathRegex = /^[\w.]+$/;
       if (simplePathRegex.test(field)) {
-        result[key] = getByPath(targetData, field) ?? null;
+        const value = getByPath(targetData, field) ?? autoResolve(root, field);
+        result[key] = value;
       } else {
         const evalScope = { ...root, ...targetData, this: targetData };
         if (contextKey) evalScope[contextKey] = targetData;
