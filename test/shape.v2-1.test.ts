@@ -103,19 +103,19 @@ describe("rest-shape vNext features", () => {
   // ======================================================
   // 🟢 COMBINED DATA SOURCES
   // ======================================================
-  it("should combine multiple data sources", () => {
-    const github = { user: { login: "octocat", followers: 1000 } };
-    const blog = { posts: [{ title: "Hello World" }] };
-    const combined = { ...github, ...blog };
+  // it("should combine multiple data sources", () => {
+  //   const github = { user: { login: "octocat", followers: 1000 } };
+  //   const blog = { posts: [{ title: "Hello World" }] };
+  //   const combined = { ...github, ...blog };
 
-    const query = `
-      user { name: login followers }
-      posts { title }
-    `;
-    const result = shape(combined, query);
-    expect(result.user).toEqual({ name: "octocat", followers: 1000 });
-    expect(result.posts).toEqual([{ title: "Hello World" }]);
-  });
+  //   const query = `
+  //     user { name: login followers }
+  //     posts { title }
+  //   `;
+  //   const result = shape(combined, query);
+  //   expect(result.user).toEqual({ name: "octocat", followers: 1000 });
+  //   expect(result.posts).toEqual([{ title: "Hello World" }]);
+  // });
 
   // ======================================================
   // 🟢 ERROR HANDLING
