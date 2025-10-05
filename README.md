@@ -60,13 +60,10 @@ manager {
   name
   email: department.manager.email
 }
+fullName: user.firstName + " " + user.lastName
 `;
 
-const computedFields = {
-  fullName: (data) => `${data.user.firstName} ${data.user.lastName}`,
-};
-
-const result = shape(data, query, undefined, data);
+const result = shape(data, query);
 console.log(result);
 ```
 
