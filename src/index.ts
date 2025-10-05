@@ -11,7 +11,8 @@ export type QueryDirective = {
   nested?: QueryObject;
   filter?: string;
   default?: any;
-  transform?: string; // @transform(fn: "...")
+  transform?: string;
+  limit?: number; // added limit support
 };
 
 /** Type guard for directive objects */
@@ -25,7 +26,8 @@ function isDirectiveObject(field: any): field is QueryDirective {
       "nested" in field ||
       "filter" in field ||
       "default" in field ||
-      "transform" in field)
+      "transform" in field ||
+      "limit" in field)
   );
 }
 
@@ -82,12 +84,12 @@ export function parseQuery(queryStr: string): QueryObject {
       continue;
     }
 
-    // Inline block: user { name } or posts(filter: "...") { title }
+    // Inline block: user { name } or posts(limit: 2) { title }
     const inlineBlockMatch = line.match(
       /^(\w+)(\([^)]*\))?\s*\{\s*([^}]*)\s*\}$/
     );
     if (inlineBlockMatch) {
-      const [, key, filterPart, innerFields] = inlineBlockMatch;
+      const [, key, argsPart, innerFields] = inlineBlockMatch;
       const nested: QueryObject = {};
       if (innerFields.trim()) {
         innerFields
@@ -96,9 +98,12 @@ export function parseQuery(queryStr: string): QueryObject {
           .forEach((f) => (nested[f] = f));
       }
       const directive: QueryDirective = { nested };
-      if (filterPart) {
-        const fm = filterPart.match(/filter:\s*["'](.+)["']/);
-        if (fm) directive.filter = fm[1];
+
+      if (argsPart) {
+        const limitMatch = argsPart.match(/limit:\s*(\d+)/);
+        if (limitMatch) directive.limit = parseInt(limitMatch[1], 10);
+        const filterMatch = argsPart.match(/filter:\s*["'](.+)["']/);
+        if (filterMatch) directive.filter = filterMatch[1];
       }
       stack[stack.length - 1].obj[key] = directive;
       continue;
@@ -131,20 +136,24 @@ export function parseQuery(queryStr: string): QueryObject {
       const filterMatch = header.match(
         /^(\w+)\(\s*filter:\s*["'](.+)["']\s*\)$/
       );
+      const limitMatch = header.match(/^(\w+)\(\s*limit:\s*(\d+)\s*\)$/);
+
       let key: string | undefined;
-      let filter: string | undefined;
+      const nested: QueryObject = {};
+      const directive: QueryDirective = { nested };
+
       if (filterMatch) {
         key = filterMatch[1];
-        filter = filterMatch[2]?.trim();
+        directive.filter = filterMatch[2]?.trim();
+      } else if (limitMatch) {
+        key = limitMatch[1];
+        directive.limit = parseInt(limitMatch[2], 10);
       } else {
         const m = header.match(/^(\w+)$/);
         if (!m) continue;
         key = m[1];
       }
 
-      const nested: QueryObject = {};
-      const directive: QueryDirective = { nested };
-      if (filter) directive.filter = filter;
       if (skipIf) directive.skipIf = skipIf;
       if (includeIf) directive.includeIf = includeIf;
 
@@ -220,7 +229,7 @@ export function parseQuery(queryStr: string): QueryObject {
   return obj;
 }
 
-/** Shape data according to query with full directive support */
+/** Shape data according to query with full directive support including limit */
 export function shape<T>(
   data: T,
   query: string | QueryObject,
@@ -309,9 +318,7 @@ export function shape<T>(
             "data",
             `with(data){ return ${field.transform} }`
           )(value, safeTarget);
-        } catch {
-          // ignore transform errors
-        }
+        } catch {}
       }
 
       // Arrays
@@ -321,6 +328,9 @@ export function shape<T>(
           arrData = arrData.filter(
             (item) => evalExpression(field.filter!, item) === true
           );
+        }
+        if (field.limit !== undefined) {
+          arrData = arrData.slice(0, field.limit);
         }
         result[key] = field.nested
           ? arrData.map((item) =>
