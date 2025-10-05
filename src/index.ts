@@ -1,7 +1,8 @@
 export type QueryField<T = any> = string | ((data: T) => any) | QueryObject;
 
 export interface QueryObject {
-  [key: string]: QueryField | QueryDirective | null;
+  [key: string]: QueryField | QueryDirective | null | any;
+  __fragments?: string[];
 }
 
 export type QueryDirective = {
@@ -16,7 +17,6 @@ export type QueryDirective = {
   skip?: number;
 };
 
-/** Type guard for directive objects */
 function isDirectiveObject(field: any): field is QueryDirective {
   return (
     typeof field === "object" &&
@@ -33,7 +33,6 @@ function isDirectiveObject(field: any): field is QueryDirective {
   );
 }
 
-/** Auto-resolve a key in nested object (deep search) */
 function autoResolve(obj: any, key: string): any {
   if (obj == null) return null;
   if ((obj as Record<string, any>)[key] !== undefined)
@@ -58,186 +57,172 @@ function getByPath(obj: any, path: string) {
 }
 
 /** Evaluate JS expression safely with `data` in scope */
-function evalExpression(expr: string, data: any) {
+function evalNestedField(expr: string, data: any, root: any) {
   try {
-    return Function("data", `with(data) { return ${expr} }`)(data);
+    return Function(
+      "data",
+      "root",
+      `
+      with(data){
+        with(root){
+          return ${expr};
+        }
+      }
+    `
+    )(data, root);
   } catch {
     return null;
   }
 }
 
-/** Parse query string into QueryObject with directives and nested blocks */
-export function parseQuery(queryStr: string): QueryObject {
+function mergeDeep(target: any, source: any) {
+  for (const key in source) {
+    if (key === "__fragments") continue;
+    if (
+      source[key] &&
+      typeof source[key] === "object" &&
+      !Array.isArray(source[key])
+    ) {
+      if (!target[key]) target[key] = {};
+      mergeDeep(target[key], source[key]);
+    } else {
+      target[key] = source[key];
+    }
+  }
+  return target;
+}
+
+/** Parse query into QueryObject with fragment detection */
+export function parseQuery(queryStr: string, rootData?: any): QueryObject {
   const lines = queryStr
     .split("\n")
     .map((l) => l.trim())
     .filter((l) => l && !l.startsWith("#"));
 
-  const obj: QueryObject = {};
-  const stack: { obj: QueryObject }[] = [{ obj }];
+  const root: QueryObject = {};
+  const stack: { obj: QueryObject }[] = [{ obj: root }];
 
   for (let line of lines) {
-    line = line.replace(/,$/, "");
+    line = line.replace(/,$/, "").trim();
+
+    // --- NEW: handle skip directive inline on a field ---
+    const skipMatch = line.match(/(\w+)\s+@skip\(if:\s*"(.*)"\)/);
+    if (skipMatch) {
+      const [, fieldName, skipExpr] = skipMatch;
+      const current = stack[stack.length - 1].obj;
+      current[fieldName] = { skipIf: skipExpr };
+      continue; // skip further processing of this line
+    }
 
     // Fragment spread
     if (line.startsWith("...")) {
       const fragName = line.slice(3).trim();
-      stack[stack.length - 1].obj[`...${fragName}`] = null;
+      const current = stack[stack.length - 1].obj;
+      current.__fragments = current.__fragments || [];
+      current.__fragments.push(fragName);
       continue;
     }
 
-    // Inline block: posts(limit: 2, skip: 1) { title }
-    const inlineBlockMatch = line.match(
-      /^(\w+)(\([^)]*\))?\s*\{\s*([^}]*)\s*\}$/
-    );
-    if (inlineBlockMatch) {
-      const [, key, argsPart, innerFields] = inlineBlockMatch;
+    // Block start
+    if (line.endsWith("{")) {
+      let header = line.slice(0, -1).trim();
       const nested: QueryObject = {};
-      if (innerFields.trim()) {
-        innerFields
-          .split(/\s+/)
-          .filter(Boolean)
-          .forEach((f) => (nested[f] = f));
-      }
       const directive: QueryDirective = { nested };
 
-      if (argsPart) {
-        const limitMatch = argsPart.match(/limit:\s*(\d+)/);
-        if (limitMatch) directive.limit = parseInt(limitMatch[1], 10);
-        const skipMatch = argsPart.match(/skip:\s*(\d+)/);
-        if (skipMatch) directive.skip = parseInt(skipMatch[1], 10);
-        const filterMatch = argsPart.match(/filter:\s*["'](.+)["']/);
-        if (filterMatch) directive.filter = filterMatch[1];
+      const skipMatch = header.match(/@skip\(if:\s*"(.*)"\)/);
+      if (skipMatch) {
+        directive.skipIf = skipMatch[1];
+        header = header.replace(skipMatch[0], "").trim();
       }
-      stack[stack.length - 1].obj[key] = directive;
+      const includeMatch = header.match(/@include\(if:\s*"(.*)"\)/);
+      if (includeMatch) {
+        directive.includeIf = includeMatch[1];
+        header = header.replace(includeMatch[0], "").trim();
+      }
+
+      const limitMatch = header.match(/limit:\s*(\d+)/);
+      if (limitMatch) directive.limit = parseInt(limitMatch[1], 10);
+      const skipArgMatch = header.match(/skip:\s*(\d+)/);
+      if (skipArgMatch) directive.skip = parseInt(skipArgMatch[1], 10);
+      const filterMatch = header.match(/filter:\s*["'](.+)["']/);
+      if (filterMatch) directive.filter = filterMatch[1];
+
+      // Match key with optional directives
+      const keyDirectiveMatch = header.match(/^(\w+)(\([^)]+\))?$/);
+      if (keyDirectiveMatch) {
+        const key = keyDirectiveMatch[1];
+        const current = stack[stack.length - 1].obj;
+        current[key] = directive;
+      }
+
+      stack.push({ obj: nested });
+      directive.nested = nested;
       continue;
     }
 
-    // End block
+    // Block end
     if (line === "}") {
       if (stack.length > 1) stack.pop();
       continue;
     }
 
-    // Multi-line nested block
-    if (line.endsWith("{")) {
-      let header = line.slice(0, -1).trim();
+    // Inline block or normal fields
+    const current = stack[stack.length - 1].obj;
 
-      const skipMatch = header.match(/@skip\(if:\s*"(.*)"\)/);
-      let skipIf: string | undefined;
-      if (skipMatch) {
-        skipIf = skipMatch[1];
-        header = header.replace(skipMatch[0], "").trim();
+    if (line.includes("{")) {
+      const inlineMatch = line.match(/^(\w+)(\([^)]*\))?\s*\{\s*([^}]*)\s*\}$/);
+      if (inlineMatch) {
+        const [, key, , innerFields] = inlineMatch;
+        const nested: QueryObject = {};
+        if (innerFields.trim()) {
+          const fieldRegex = /(\.\.\.\w+|\w+\s*:\s*[\w.@\[\]]+|\w+)/g;
+          const matches = innerFields.match(fieldRegex) ?? [];
+          matches.forEach((f) => {
+            if (f.startsWith("...")) {
+              nested.__fragments = nested.__fragments || [];
+              nested.__fragments.push(f.slice(3));
+              return;
+            }
+            const aliasMatch = f.match(/^(\w+)\s*:\s*(.+)$/);
+            if (aliasMatch) {
+              const [_, alias, expr] = aliasMatch;
+              // Treat "." or "[]" as computed JS expression
+              if (expr.includes(".") || expr.includes("[")) {
+                nested[alias] = (data: any, root: any) =>
+                  evalNestedField(expr, data, root);
+              } else {
+                nested[alias] = { path: expr };
+              }
+            } else {
+              nested[f.trim()] = f.trim();
+            }
+          });
+        }
+        current[key] = { nested };
+        continue;
       }
-
-      const includeMatch = header.match(/@include\(if:\s*"(.*)"\)/);
-      let includeIf: string | undefined;
-      if (includeMatch) {
-        includeIf = includeMatch[1];
-        header = header.replace(includeMatch[0], "").trim();
-      }
-
-      const filterMatch = header.match(
-        /^(\w+)\(\s*filter:\s*["'](.+)["']\s*\)$/
-      );
-      const limitMatch = header.match(/^(\w+)\(\s*limit:\s*(\d+)\s*\)$/);
-      const skipArgMatch = header.match(/^(\w+)\(\s*skip:\s*(\d+)\s*\)$/);
-
-      let key: string | undefined;
-      const nested: QueryObject = {};
-      const directive: QueryDirective = { nested };
-
-      if (filterMatch) {
-        key = filterMatch[1];
-        directive.filter = filterMatch[2]?.trim();
-      } else if (limitMatch) {
-        key = limitMatch[1];
-        directive.limit = parseInt(limitMatch[2], 10);
-      } else if (skipArgMatch) {
-        key = skipArgMatch[1];
-        directive.skip = parseInt(skipArgMatch[2], 10);
-      } else {
-        const m = header.match(/^(\w+)$/);
-        if (!m) continue;
-        key = m[1];
-      }
-
-      if (skipIf) directive.skipIf = skipIf;
-      if (includeIf) directive.includeIf = includeIf;
-
-      stack[stack.length - 1].obj[key!] = directive;
-      stack.push({ obj: nested });
-      continue;
     }
 
-    // Single-line field
-    let skipIfSingle: string | undefined;
-    let includeIfSingle: string | undefined;
-    let defaultValue: any = undefined;
-    let transformValue: string | undefined;
-
-    const skipMatchSingle = line.match(/@skip\(if:\s*"(.*)"\)/);
-    const includeMatchSingle = line.match(/@include\(if:\s*"(.*)"\)/);
-    const defaultMatch = line.match(/@default\(value:\s*["'](.+)["']\)/);
-    const transformMatch = line.match(/@transform\(fn:\s*"(.*)"\)/);
-
-    let fieldLine = line;
-
-    if (skipMatchSingle) {
-      skipIfSingle = skipMatchSingle[1];
-      fieldLine = fieldLine.replace(skipMatchSingle[0], "").trim();
-    }
-    if (includeMatchSingle) {
-      includeIfSingle = includeMatchSingle[1];
-      fieldLine = fieldLine.replace(includeMatchSingle[0], "").trim();
-    }
-    if (defaultMatch) {
-      defaultValue = defaultMatch[1];
-      fieldLine = fieldLine.replace(defaultMatch[0], "").trim();
-    }
-    if (transformMatch) {
-      transformValue = transformMatch[1];
-      fieldLine = fieldLine.replace(transformMatch[0], "").trim();
-    }
-
-    // Alias
-    const aliasMatch = fieldLine.match(/^(\w+)\s*:\s*(.+)$/);
+    // Normal field or alias
+    const aliasMatch = line.match(/^(\w+)\s*:\s*(.+)$/);
     if (aliasMatch) {
-      const alias = aliasMatch[1];
-      const expr = aliasMatch[2];
-      stack[stack.length - 1].obj[alias] = {
-        path: expr,
-        skipIf: skipIfSingle,
-        includeIf: includeIfSingle,
-        default: defaultValue,
-        transform: transformValue,
-      };
-      continue;
-    }
-
-    // Normal field
-    if (
-      skipIfSingle ||
-      includeIfSingle ||
-      defaultValue !== undefined ||
-      transformValue
-    ) {
-      stack[stack.length - 1].obj[fieldLine] = {
-        path: fieldLine,
-        skipIf: skipIfSingle,
-        includeIf: includeIfSingle,
-        default: defaultValue,
-        transform: transformValue,
-      };
+      const [_, alias, expr] = aliasMatch;
+      if (expr.includes(".") || expr.includes("[")) {
+        // Computed JS expression
+        current[alias] = (data: any) =>
+          evalNestedField(expr, data, rootData ?? data);
+      } else {
+        current[alias] = { path: expr };
+      }
     } else {
-      stack[stack.length - 1].obj[fieldLine] = fieldLine;
+      current[line] = line;
     }
   }
 
-  return obj;
+  return root;
 }
 
-/** Shape data according to query with full directive support including skip/limit */
+/** Shape data according to query with fragment support */
 export function shape<T>(
   data: T,
   query: string | QueryObject,
@@ -246,79 +231,69 @@ export function shape<T>(
   contextKey?: string
 ): any {
   const queryObj: QueryObject =
-    typeof query === "string" ? parseQuery(query) : query;
+    typeof query === "string" ? parseQuery(query, rootData ?? data) : query;
 
-  const result: any = {};
+  let result: any = {};
   const root = rootData ?? data;
 
-  for (const key in queryObj) {
-    const field = queryObj[key];
+  if (queryObj.__fragments && fragments) {
+    queryObj.__fragments.forEach((fragName) => {
+      const fragQuery = fragments[fragName];
+      if (!fragQuery) return;
 
-    const targetData =
-      root === data && (data as any)[key] !== undefined
-        ? (data as any)[key]
-        : data;
-    const safeTarget = targetData ?? {};
-
-    // Fragment spread
-    if (key.startsWith("...") && fragments) {
-      const fragName = key.slice(3).trim();
-      if (fragments[fragName]) {
-        const fragResult = shape(
-          safeTarget,
-          fragments[fragName],
-          fragments,
-          root,
-          contextKey
-        );
-        Object.assign(result, fragResult);
+      const fragResult = shape(data, fragQuery, fragments, root, contextKey);
+      if (Array.isArray(result)) {
+        result = result.map((item, idx) => mergeDeep(item, fragResult[idx]));
+      } else {
+        mergeDeep(result, fragResult);
       }
+    });
+  }
+
+  for (const key in queryObj) {
+    if (key === "__fragments") continue;
+
+    const field = queryObj[key];
+    const safeTarget = data ?? {};
+
+    if (typeof field === "function") {
+      result[key] = field(safeTarget, root);
       continue;
     }
 
-    // Directive object
     if (isDirectiveObject(field)) {
-      const evalScope = { ...root, ...safeTarget, this: safeTarget };
-      if (contextKey) evalScope[contextKey] = safeTarget;
-
-      if (field.skipIf && !!evalExpression(field.skipIf, evalScope)) {
-        result[key] = null;
-        continue;
-      }
-      if (field.includeIf && !evalExpression(field.includeIf, evalScope)) {
-        result[key] = null;
-        continue;
-      }
-
-      // Resolve value
       let value: any = null;
+
+      // Evaluate skipIf
+      if (field.skipIf) {
+        const shouldSkip = !!evalNestedField(field.skipIf, safeTarget, root);
+        if (shouldSkip) {
+          result[key] = null;
+          continue;
+        }
+      }
+
       if (field.path) {
         const parts = field.path.split("||").map((p) => p.trim());
         for (const part of parts) {
-          const stringLiteralMatch = part.match(/^["'](.*)["']$/);
-          if (stringLiteralMatch) {
-            value = stringLiteralMatch[1];
-            break;
-          }
           value =
-            getByPath(safeTarget, part) ??
+            getByPath(safeTarget as Record<string, any>, part) ??
+            getByPath(root, part) ??
             autoResolve(root, part) ??
-            evalExpression(part, evalScope);
+            evalNestedField(part, safeTarget, root);
           if (value != null) break;
         }
       } else {
-        value = safeTarget[key] ?? autoResolve(root, key);
+        value =
+          (safeTarget as Record<string, any>)[key] ?? autoResolve(root, key);
       }
 
-      // Apply @default
       if (
         (value === null || value === undefined) &&
         field.default !== undefined
-      ) {
+      )
         value = field.default;
-      }
 
-      // Apply @transform
       if (field.transform && value != null) {
         try {
           value = Function(
@@ -329,28 +304,23 @@ export function shape<T>(
         } catch {}
       }
 
-      // Arrays
       if (Array.isArray(value)) {
         let arrData = value;
-        if (field.filter) {
+        if (field.filter)
           arrData = arrData.filter(
-            (item) => evalExpression(field.filter!, item) === true
+            (item) => !!evalNestedField(field.filter!, item, root)
           );
-        }
-        if (field.skip !== undefined) {
-          arrData = arrData.slice(field.skip);
-        }
-        if (field.limit !== undefined) {
-          arrData = arrData.slice(0, field.limit);
-        }
+
+        if (field.skip !== undefined) arrData = arrData.slice(field.skip);
+        if (field.limit !== undefined) arrData = arrData.slice(0, field.limit);
         result[key] = field.nested
           ? arrData.map((item) =>
-              shape(item, field.nested as QueryObject, fragments, root, key)
+              shape(item, field.nested!, fragments, root, key)
             )
           : arrData;
       } else if (typeof value === "object" && value !== null) {
         result[key] = field.nested
-          ? shape(value, field.nested as QueryObject, fragments, root, key)
+          ? shape(value, field.nested!, fragments, root, key)
           : value;
       } else {
         result[key] = value ?? null;
@@ -358,9 +328,8 @@ export function shape<T>(
       continue;
     }
 
-    // Nested object
     if (typeof field === "object" && field !== null) {
-      const nestedValue = safeTarget[key] ?? autoResolve(root, key) ?? {};
+      const nestedValue = (safeTarget as Record<string, any>)[key] ?? {};
       result[key] = shape(
         nestedValue,
         field as QueryObject,
@@ -371,34 +340,16 @@ export function shape<T>(
       continue;
     }
 
-    // String field with || fallback
     if (typeof field === "string") {
-      const evalScope = { ...root, ...safeTarget, this: safeTarget };
-      const parts = field.split("||").map((p) => p.trim());
-      let value: any = null;
-      for (const part of parts) {
-        const stringLiteralMatch = part.match(/^["'](.*)["']$/);
-        if (stringLiteralMatch) {
-          value = stringLiteralMatch[1];
-          break;
-        }
-        value =
-          getByPath(safeTarget, part) ??
-          autoResolve(root, part) ??
-          evalExpression(part, evalScope);
-        if (value != null) break;
-      }
-      result[key] = value ?? null;
+      result[key] =
+        evalNestedField(field, safeTarget, root) ??
+        getByPath(safeTarget, field) ??
+        autoResolve(root, field) ??
+        null;
       continue;
     }
 
-    // Function field
-    if (typeof field === "function") {
-      result[key] = field(safeTarget);
-      continue;
-    }
-
-    result[key] = safeTarget[key] ?? null;
+    result[key] = (safeTarget as Record<string, any>)[key] ?? null;
   }
 
   return result;
