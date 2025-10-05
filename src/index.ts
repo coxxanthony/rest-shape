@@ -10,6 +10,7 @@ export type QueryDirective = {
   includeIf?: string;
   nested?: QueryObject;
   filter?: string;
+  default?: any; // support for @default
 };
 
 /** Type guard for directive objects */
@@ -21,7 +22,8 @@ function isDirectiveObject(field: any): field is QueryDirective {
       "skipIf" in field ||
       "includeIf" in field ||
       "nested" in field ||
-      "filter" in field)
+      "filter" in field ||
+      "default" in field)
   );
 }
 
@@ -58,7 +60,7 @@ function evalExpression(expr: string, data: any) {
   }
 }
 
-/** Parse query string into QueryObject with nested, filter, skip, include, computed fields, and fragment spreads */
+/** Parse query string into QueryObject with nested, filter, skip, include, computed fields, fragments, and @default */
 export function parseQuery(queryStr: string): QueryObject {
   const lines = queryStr
     .split("\n")
@@ -71,14 +73,14 @@ export function parseQuery(queryStr: string): QueryObject {
   for (let line of lines) {
     line = line.replace(/,$/, "");
 
-    // Handle fragment spreads
+    // Fragment spreads
     if (line.startsWith("...")) {
       const fragName = line.slice(3).trim();
       stack[stack.length - 1].obj[`...${fragName}`] = null;
       continue;
     }
 
-    // --- Inline blocks: user { name } or posts(filter: "...") { title }
+    // Inline blocks: user { name } or posts(filter: "...") { title }
     const inlineBlockMatch = line.match(
       /^(\w+)(\([^)]*\))?\s*\{\s*([^}]*)\s*\}$/
     );
@@ -100,13 +102,12 @@ export function parseQuery(queryStr: string): QueryObject {
       continue;
     }
 
-    // --- End of nested block
     if (line === "}") {
       if (stack.length > 1) stack.pop();
       continue;
     }
 
-    // --- Start multi-line nested block
+    // Multi-line nested block
     if (line.endsWith("{")) {
       let header = line.slice(0, -1).trim();
 
@@ -149,12 +150,16 @@ export function parseQuery(queryStr: string): QueryObject {
       continue;
     }
 
-    // --- Single-line field
+    // Single-line field
     const skipMatchSingle = line.match(/@skip\(if:\s*"(.*)"\)/);
     const includeMatchSingle = line.match(/@include\(if:\s*"(.*)"\)/);
+    const defaultMatch = line.match(/@default\(value:\s*["'](.+)["']\)/);
+
     let skipIfSingle: string | undefined;
     let includeIfSingle: string | undefined;
+    let defaultValue: any = undefined;
     let fieldLine = line;
+
     if (skipMatchSingle) {
       skipIfSingle = skipMatchSingle[1];
       fieldLine = fieldLine.replace(skipMatchSingle[0], "").trim();
@@ -163,8 +168,11 @@ export function parseQuery(queryStr: string): QueryObject {
       includeIfSingle = includeMatchSingle[1];
       fieldLine = fieldLine.replace(includeMatchSingle[0], "").trim();
     }
+    if (defaultMatch) {
+      defaultValue = defaultMatch[1];
+      fieldLine = fieldLine.replace(defaultMatch[0], "").trim();
+    }
 
-    // --- Alias / computed field
     const aliasMatch = fieldLine.match(/^(\w+)\s*:\s*(.+)$/);
     if (aliasMatch) {
       const alias = aliasMatch[1];
@@ -173,16 +181,17 @@ export function parseQuery(queryStr: string): QueryObject {
         path: expr,
         skipIf: skipIfSingle,
         includeIf: includeIfSingle,
+        default: defaultValue,
       };
       continue;
     }
 
-    // --- Simple field
-    if (skipIfSingle || includeIfSingle) {
+    if (skipIfSingle || includeIfSingle || defaultValue !== undefined) {
       stack[stack.length - 1].obj[fieldLine] = {
         path: fieldLine,
         skipIf: skipIfSingle,
         includeIf: includeIfSingle,
+        default: defaultValue,
       };
     } else {
       stack[stack.length - 1].obj[fieldLine] = fieldLine;
@@ -192,7 +201,7 @@ export function parseQuery(queryStr: string): QueryObject {
   return obj;
 }
 
-/** Shape data according to query, with full fragment support */
+/** Shape data according to query */
 export function shape<T>(
   data: T,
   query: string | QueryObject,
@@ -214,12 +223,14 @@ export function shape<T>(
         ? (data as any)[key]
         : data;
 
-    // --- Fragment spread at this level
+    const safeTarget = targetData ?? {};
+
+    // Fragment spread
     if (key.startsWith("...") && fragments) {
       const fragName = key.slice(3).trim();
       if (fragments[fragName]) {
         const fragResult = shape(
-          targetData,
+          safeTarget,
           fragments[fragName],
           fragments,
           root,
@@ -230,75 +241,54 @@ export function shape<T>(
       continue;
     }
 
-    // --- Directive objects
+    // Directive objects
     if (isDirectiveObject(field)) {
-      const evalScope = { ...root, ...targetData, this: targetData };
-      if (contextKey) evalScope[contextKey] = targetData;
+      const evalScope = { ...root, ...safeTarget, this: safeTarget };
+      if (contextKey) evalScope[contextKey] = safeTarget;
 
-      // --- skip
-      if (field.skipIf) {
-        let shouldSkip = false;
-        try {
-          shouldSkip = !!evalExpression(field.skipIf, evalScope);
-        } catch {
-          shouldSkip = true;
-        }
-        if (shouldSkip) {
-          result[key] = null;
-          continue;
-        }
+      // skip/include
+      if (field.skipIf && !!evalExpression(field.skipIf, evalScope)) {
+        result[key] = null;
+        continue;
+      }
+      if (
+        field.includeIf &&
+        field.includeIf &&
+        !evalExpression(field.includeIf, evalScope)
+      ) {
+        result[key] = null;
+        continue;
       }
 
-      // --- include
-      if (field.includeIf) {
-        let shouldInclude = false;
-        try {
-          shouldInclude = !!evalExpression(field.includeIf, evalScope);
-        } catch {
-          shouldInclude = false;
-        }
-        if (!shouldInclude) {
-          result[key] = null;
-          continue;
-        }
-      }
-
-      // --- handle path with fallback ||
-      let value: any;
-      if (field.path && field.path.includes("||")) {
+      // Resolve value
+      let value: any = null;
+      if (field.path) {
         const parts = field.path.split("||").map((p) => p.trim());
-        value = null;
-
         for (const part of parts) {
           const stringLiteralMatch = part.match(/^["'](.*)["']$/);
           if (stringLiteralMatch) {
             value = stringLiteralMatch[1];
             break;
           }
-
-          value = getByPath(targetData, part);
-          if (value != null) break;
-
-          value = autoResolve(root, part);
-          if (value != null) break;
-
-          try {
-            value = evalExpression(part, evalScope);
-          } catch {
-            value = null;
-          }
+          value =
+            getByPath(safeTarget, part) ??
+            autoResolve(root, part) ??
+            evalExpression(part, evalScope);
           if (value != null) break;
         }
       } else {
-        value = field.path
-          ? evalExpression(field.path, evalScope)
-          : (targetData as Record<string, any>)[key];
+        value = safeTarget[key] ?? autoResolve(root, key);
       }
 
-      if (value === undefined && root !== targetData)
-        value = (root as Record<string, any>)[key];
-      if (value === undefined) value = autoResolve(root, key);
+      // Apply @default
+      if (
+        (value === null || value === undefined) &&
+        field.default !== undefined
+      ) {
+        value = field.default;
+      }
 
+      // Arrays
       if (Array.isArray(value)) {
         let arrData = value;
         if (field.filter) {
@@ -318,91 +308,12 @@ export function shape<T>(
       } else {
         result[key] = value ?? null;
       }
-
       continue;
     }
 
-    // --- String fields
-    if (typeof field === "string") {
-      const simplePathRegex = /^[\w.]+$/;
-
-      // Detect default fallback using `||`
-      if (field.includes("||")) {
-        const parts = field.split("||").map((p) => p.trim());
-        let value: any = null;
-
-        for (let part of parts) {
-          // If it’s a quoted string literal, return it as-is
-          const stringLiteralMatch = part.match(/^["'](.*)["']$/);
-          if (stringLiteralMatch) {
-            value = stringLiteralMatch[1];
-            break;
-          }
-
-          // Try dot-path in targetData
-          value = getByPath(targetData, part);
-          if (value != null) break;
-
-          // Try autoResolve in root
-          value = autoResolve(root, part);
-          if (value != null) break;
-
-          // Try evaluating as expression
-          const evalScope = { ...root, ...targetData, this: targetData };
-          if (contextKey) evalScope[contextKey] = targetData;
-          try {
-            value = evalExpression(part, evalScope);
-          } catch {
-            value = null;
-          }
-          if (value != null) break;
-        }
-
-        result[key] = value ?? null;
-        continue;
-      }
-
-      if (simplePathRegex.test(field)) {
-        const value = getByPath(targetData, field) ?? autoResolve(root, field);
-        result[key] = value;
-      } else {
-        const evalScope = { ...root, ...targetData, this: targetData };
-        if (contextKey) evalScope[contextKey] = targetData;
-        result[key] = evalExpression(field, evalScope);
-      }
-      continue;
-    }
-
-    // --- Function fields
-    if (typeof field === "function") {
-      result[key] = field(targetData);
-      continue;
-    }
-
-    // --- Nested objects
+    // Nested object (non-directive)
     if (typeof field === "object" && field !== null) {
-      // Resolve nested fragment spreads inside object
-      const keys = Object.keys(field);
-      for (const k of keys) {
-        if (k.startsWith("...") && fragments && fragments[k.slice(3).trim()]) {
-          const fragName = k.slice(3).trim();
-          const fragResult = shape(
-            targetData,
-            fragments[fragName],
-            fragments,
-            root,
-            contextKey
-          );
-          Object.assign(field, fragResult);
-          delete field[k];
-        }
-      }
-
-      let nestedValue = (targetData as Record<string, any>)[key];
-      if (nestedValue === undefined && root !== targetData)
-        nestedValue = (root as Record<string, any>)[key];
-      if (nestedValue === undefined) nestedValue = autoResolve(root, key);
-
+      const nestedValue = safeTarget[key] ?? autoResolve(root, key) ?? {};
       result[key] = shape(
         nestedValue,
         field as QueryObject,
@@ -413,8 +324,34 @@ export function shape<T>(
       continue;
     }
 
-    // --- Fallback
-    result[key] = (targetData as Record<string, any>)[key] ?? null;
+    // String field with || fallback
+    if (typeof field === "string") {
+      const evalScope = { ...root, ...safeTarget, this: safeTarget };
+      const parts = field.split("||").map((p) => p.trim());
+      let value: any = null;
+      for (const part of parts) {
+        const stringLiteralMatch = part.match(/^["'](.*)["']$/);
+        if (stringLiteralMatch) {
+          value = stringLiteralMatch[1];
+          break;
+        }
+        value =
+          getByPath(safeTarget, part) ??
+          autoResolve(root, part) ??
+          evalExpression(part, evalScope);
+        if (value != null) break;
+      }
+      result[key] = value ?? null;
+      continue;
+    }
+
+    // Function field
+    if (typeof field === "function") {
+      result[key] = field(safeTarget);
+      continue;
+    }
+
+    result[key] = safeTarget[key] ?? null;
   }
 
   return result;
