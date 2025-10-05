@@ -12,7 +12,8 @@ export type QueryDirective = {
   filter?: string;
   default?: any;
   transform?: string;
-  limit?: number; // added limit support
+  limit?: number;
+  skip?: number;
 };
 
 /** Type guard for directive objects */
@@ -27,7 +28,8 @@ function isDirectiveObject(field: any): field is QueryDirective {
       "filter" in field ||
       "default" in field ||
       "transform" in field ||
-      "limit" in field)
+      "limit" in field ||
+      "skip" in field)
   );
 }
 
@@ -84,7 +86,7 @@ export function parseQuery(queryStr: string): QueryObject {
       continue;
     }
 
-    // Inline block: user { name } or posts(limit: 2) { title }
+    // Inline block: posts(limit: 2, skip: 1) { title }
     const inlineBlockMatch = line.match(
       /^(\w+)(\([^)]*\))?\s*\{\s*([^}]*)\s*\}$/
     );
@@ -102,6 +104,8 @@ export function parseQuery(queryStr: string): QueryObject {
       if (argsPart) {
         const limitMatch = argsPart.match(/limit:\s*(\d+)/);
         if (limitMatch) directive.limit = parseInt(limitMatch[1], 10);
+        const skipMatch = argsPart.match(/skip:\s*(\d+)/);
+        if (skipMatch) directive.skip = parseInt(skipMatch[1], 10);
         const filterMatch = argsPart.match(/filter:\s*["'](.+)["']/);
         if (filterMatch) directive.filter = filterMatch[1];
       }
@@ -137,6 +141,7 @@ export function parseQuery(queryStr: string): QueryObject {
         /^(\w+)\(\s*filter:\s*["'](.+)["']\s*\)$/
       );
       const limitMatch = header.match(/^(\w+)\(\s*limit:\s*(\d+)\s*\)$/);
+      const skipArgMatch = header.match(/^(\w+)\(\s*skip:\s*(\d+)\s*\)$/);
 
       let key: string | undefined;
       const nested: QueryObject = {};
@@ -148,6 +153,9 @@ export function parseQuery(queryStr: string): QueryObject {
       } else if (limitMatch) {
         key = limitMatch[1];
         directive.limit = parseInt(limitMatch[2], 10);
+      } else if (skipArgMatch) {
+        key = skipArgMatch[1];
+        directive.skip = parseInt(skipArgMatch[2], 10);
       } else {
         const m = header.match(/^(\w+)$/);
         if (!m) continue;
@@ -229,7 +237,7 @@ export function parseQuery(queryStr: string): QueryObject {
   return obj;
 }
 
-/** Shape data according to query with full directive support including limit */
+/** Shape data according to query with full directive support including skip/limit */
 export function shape<T>(
   data: T,
   query: string | QueryObject,
@@ -328,6 +336,9 @@ export function shape<T>(
           arrData = arrData.filter(
             (item) => evalExpression(field.filter!, item) === true
           );
+        }
+        if (field.skip !== undefined) {
+          arrData = arrData.slice(field.skip);
         }
         if (field.limit !== undefined) {
           arrData = arrData.slice(0, field.limit);
